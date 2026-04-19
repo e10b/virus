@@ -23,9 +23,16 @@ public:
 	}
 
 	void update();
+	float consumeWheelDelta()
+	{
+		float d = wheelDeltaY;
+		wheelDeltaY = 0.0f;
+		return d;
+	}
 
 	void draw();
 
 	bool close = false;
 	SDL_Window* window;
+	float wheelDeltaY = 0.0f;
 };

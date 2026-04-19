@@ -1,4 +1,5 @@
 #include "context.h"
+#include "imgui_impl_sdl3.h"
 
 Context::Context()
 {
@@ -13,6 +14,7 @@ void Context::update()
 	SDL_Event event;
 	while (SDL_PollEvent(&event))
 	{
+		ImGui_ImplSDL3_ProcessEvent(&event);
 		switch (event.type)
 		{
 		case SDL_EVENT_WINDOW_RESIZED:
@@ -42,6 +44,10 @@ void Context::update()
 
 		case SDL_EVENT_WINDOW_EXPOSED:
 			wgfx::initSurface();
+			break;
+
+		case SDL_EVENT_MOUSE_WHEEL:
+			wheelDeltaY += event.wheel.y;
 			break;
 		}
 	}

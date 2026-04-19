@@ -22,8 +22,17 @@ set(src
 	example/clock.cpp
 )
 file(GLOB_RECURSE srcc CONFIGURE_DEPENDS "deps/wgfx/src/*.cpp")
+set(imgui_src
+	deps/imgui/imgui.cpp
+	deps/imgui/imgui_draw.cpp
+	deps/imgui/imgui_tables.cpp
+	deps/imgui/imgui_widgets.cpp
+	deps/imgui/imgui_demo.cpp
+	deps/imgui/backends/imgui_impl_sdl3.cpp
+	deps/imgui/backends/imgui_impl_wgpu.cpp
+)
 
-add_executable( App ${src} ${srcc} example/main.cpp )
+add_executable( App ${src} ${srcc} ${imgui_src} example/main.cpp )
  #"sdl2webgpu/sdl2webgpu.c" "sdl2webgpu/sdl2webgpu.h")
 
  if(DEV_MODE)
@@ -42,7 +51,8 @@ else()
 endif()
 
 target_link_libraries(App PRIVATE webgpu sdl2webgpu SDL3-static glm::glm)
-target_include_directories(App PRIVATE "deps/wgfx/src" "deps/sdl3/include" "deps")
+target_include_directories(App PRIVATE "deps/wgfx/src" "deps/sdl3/include" "deps" "deps/imgui" "deps/imgui/backends")
+target_compile_definitions(App PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
 
 target_copy_webgpu_binaries(App)
 
