@@ -17,8 +17,11 @@ set(LEVELDB_BUILD_BENCHMARKS OFF CACHE BOOL "Disable LevelDB benchmarks (do not 
 add_subdirectory(deps)
 
 
-file(GLOB_RECURSE src CONFIGURE_DEPENDS "example/*.cpp")
-	list(FILTER src EXCLUDE REGEX "example/main.cpp")
+set(src
+	example/context.cpp
+	example/clock.cpp
+	example/stb_image_impl.cpp
+)
 file(GLOB_RECURSE srcc CONFIGURE_DEPENDS "src/*.cpp") #intriguing..
 
 add_executable( App ${src} ${srcc} example/main.cpp )

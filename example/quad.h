@@ -16,11 +16,10 @@ public:
 	}
 
 	wgfx::Pipeline* pipeline;
-	wgfx::Texture texture;
 
 	Quad()
 	{
-		pipeline = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "quad.wgsl").c_str()));
+		pipeline = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "atoms_sphere.wgsl").c_str()));
 
 		float quadWidth = 1.0f;
 		float quadHeight = 1.0f;
@@ -52,11 +51,6 @@ public:
 		pipeline->setVertexBuffer(verticies);
 		pipeline->setIndexBuffer(indicies);
 
-		// Simple quad pipeline setup - just texture and sampler
-		texture = wgfx::loadTextureDst(raytraceWidth, raytraceHeight);
-		pipeline->addTexture(0, texture);
-		pipeline->addSampler(1, texture);
-
 		pipeline->targets = 1;
 		pipeline->useDepth = false;
 
@@ -68,32 +62,6 @@ public:
 		pipeline->uniforms.clear(); // Reset uniform count
 		quad_.bind(pipeline);
 	}
-
-	// Brickmap configuration
-	// Hierarchy: Sector → Brick → Voxel
-	const int brickSize = 8; // 8x8x8 voxels per brick
-	const int bricksPerSector = 2; // 2x2x2 bricks per sector (16x16x16 voxels per sector)
-	
-	const int size = 512;
-	const int sizeX = size;
-	const int sizeY = size;
-	const int sizeZ = size;
-
-	const int sectorSize = brickSize * bricksPerSector; // 16 voxels per sector side
-	const int sectorsX = sizeX / sectorSize;
-	const int sectorsY = sizeY / sectorSize;
-	const int sectorsZ = sizeZ / sectorSize;
-	
-	const int bricksX = sizeX / brickSize; // 128 bricks
-	const int bricksY = sizeY / brickSize; // 128 bricks
-	const int bricksZ = sizeZ / brickSize; // 128 bricks
-
-	size_t voxelCount = sizeX * sizeY * sizeZ;
-	size_t brickCount = bricksX * bricksY * bricksZ;
-	size_t sectorCount = sectorsX * sectorsY * sectorsZ;
-	size_t quarterVoxelCount = voxelCount / 4;
-
-	uint32_t* voxelData = new uint32_t[voxelCount]; // For voxelizer (full array)
 
 private:
 	Model quad_;
