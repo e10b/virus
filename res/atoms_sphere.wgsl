@@ -269,7 +269,9 @@ fn intensityAt(pos: vec3f, n: i32, l: i32, m: i32, intensityScale: f32, intensit
     let angular = plm * plm;
 
     let raw = radialP * angular;
-    let scaled = raw * max(intensityScale, 0.0001) * 1.5 * pow(5.0, f32(n));
+    // Keep brightness roughly consistent as n grows without washing out to white.
+    let nNorm = pow(max(f32(n), 1.0), 3.0);
+    let scaled = raw * max(intensityScale, 0.0001) * 30.0 * nNorm;
     // intensityRange controls highlight compression; lower values are brighter, higher values preserve contrast.
     return clamp(scaled / (scaled + max(intensityRange, 0.0001)), 0.0, 1.0);
 }
