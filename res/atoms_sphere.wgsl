@@ -18,8 +18,8 @@ struct OrbitalUniform {
 
 @group(0) @binding(0) var<uniform> orbital: OrbitalUniform;
 
-const RADIAL_BINS: i32 = 192;
-const THETA_BINS: i32 = 160;
+const RADIAL_BINS: i32 = 384;
+const THETA_BINS: i32 = 256;
 
 fn hash32(x: u32) -> u32 {
     var v = x;
@@ -136,10 +136,14 @@ fn thetaPdf(theta: f32, l: i32, mAbs: i32) -> f32 {
 }
 
 fn sampleRFromCDF(u: f32, n: i32, l: i32) -> f32 {
-    let rMax = 10.0 * f32(n * n);
+    let nF = max(f32(n), 1.0);
+    let lF = max(f32(l), 0.0);
+    let expectedR = max(0.5 * (3.0 * nF * nF - lF * (lF + 1.0)), 0.0);
+    // Keep radial domain continuous across l to avoid visible step changes.
+    let rMax = 12.0 * nF * nF;
     let dr = rMax / f32(RADIAL_BINS - 1);
-    var cdf: array<f32, 192>;
-    var sum = 0.0;
+    var cdf: array<f32, 384>;
+    var pdfMax = 0.0;
 
     var i = 0;
     loop {
@@ -147,13 +151,29 @@ fn sampleRFromCDF(u: f32, n: i32, l: i32) -> f32 {
             break;
         }
         let r = f32(i) * dr;
-        sum += radialPdf(r, n, l);
+        pdfMax = max(pdfMax, radialPdf(r, n, l));
+        i += 1;
+    }
+
+    if (pdfMax <= 1e-20) {
+        // Degenerate numeric case: fall back to smooth physics-based expected radius.
+        return clamp(expectedR, 0.0, rMax);
+    }
+
+    var sum = 0.0;
+    i = 0;
+    loop {
+        if (i >= RADIAL_BINS) {
+            break;
+        }
+        let r = f32(i) * dr;
+        sum += radialPdf(r, n, l) / pdfMax;
         cdf[i] = sum;
         i += 1;
     }
 
     if (sum <= 1e-8) {
-        return 0.0;
+        return clamp(expectedR, 0.0, rMax);
     }
 
     let sampleTarget = u * sum;
@@ -184,8 +204,8 @@ fn sampleRFromCDF(u: f32, n: i32, l: i32) -> f32 {
 
 fn sampleThetaFromCDF(u: f32, l: i32, mAbs: i32) -> f32 {
     let dTheta = 3.14159265358979323846 / f32(THETA_BINS - 1);
-    var cdf: array<f32, 160>;
-    var sum = 0.0;
+    var cdf: array<f32, 256>;
+    var pdfMax = 0.0;
 
     var i = 0;
     loop {
@@ -193,13 +213,28 @@ fn sampleThetaFromCDF(u: f32, l: i32, mAbs: i32) -> f32 {
             break;
         }
         let theta = f32(i) * dTheta;
-        sum += thetaPdf(theta, l, mAbs);
+        pdfMax = max(pdfMax, thetaPdf(theta, l, mAbs));
+        i += 1;
+    }
+
+    if (pdfMax <= 1e-20) {
+        return 0.5 * 3.14159265358979323846;
+    }
+
+    var sum = 0.0;
+    i = 0;
+    loop {
+        if (i >= THETA_BINS) {
+            break;
+        }
+        let theta = f32(i) * dTheta;
+        sum += thetaPdf(theta, l, mAbs) / pdfMax;
         cdf[i] = sum;
         i += 1;
     }
 
     if (sum <= 1e-8) {
-        return 0.0;
+        return 0.5 * 3.14159265358979323846;
     }
 
     let sampleTarget = u * sum;
@@ -289,10 +324,25 @@ fn samplePalette6(x: f32, c0: vec3f, c1: vec3f, c2: vec3f, c3: vec3f, c4: vec3f,
     return c4 + (u - 4.0) * (c5 - c4);
 }
 
-fn mapColor(t: f32, colorMode: i32) -> vec3f {
+fn hsvToRgb(h: f32, s: f32, v: f32) -> vec3f {
+    let hue = fract(h);
+    let hh = hue * 6.0;
+    let c = v * s;
+    let x = c * (1.0 - abs(fract(hh) * 2.0 - 1.0));
+    let m = v - c;
+
+    if (hh < 1.0) { return vec3f(c + m, x + m, m); }
+    if (hh < 2.0) { return vec3f(x + m, c + m, m); }
+    if (hh < 3.0) { return vec3f(m, c + m, x + m); }
+    if (hh < 4.0) { return vec3f(m, x + m, c + m); }
+    if (hh < 5.0) { return vec3f(x + m, m, c + m); }
+    return vec3f(c + m, m, x + m);
+}
+
+fn mapColor(t: f32, colorMode: i32, samplePos: vec3f, simulationTime: f32, n: i32, m: i32, localOmega: f32) -> vec3f {
     let x = clamp(t, 0.0, 1.0);
     // 0: Inferno, 1: Magma, 2: Plasma, 3: Viridis, 4: Cividis,
-    // 5: Turbo, 6: Gray, 7: Fire, 8: Cyan-Magenta.
+    // 5: Turbo, 6: Gray, 7: Fire, 8: Cyan-Magenta, 9: Phase Velocity, 10: Stationary Phase.
     if (colorMode == 0) {
         return samplePalette6(x,
             vec3f(0.0015, 0.0005, 0.0139),
@@ -353,6 +403,17 @@ fn mapColor(t: f32, colorMode: i32) -> vec3f {
     if (colorMode == 8) {
         return vec3f(0.2 + 0.8 * x, 1.0 - 0.6 * x, 1.0);
     }
+    if (colorMode == 9) {
+        let basePhi = atan2(samplePos.z, samplePos.x) / 6.28318530717958647692;
+        let hue = fract(basePhi + simulationTime * (0.06 * localOmega));
+        return hsvToRgb(hue, 0.92, 0.22 + 0.78 * x);
+    }
+    if (colorMode == 10) {
+        let basePhi = f32(m) * atan2(samplePos.z, samplePos.x) / 6.28318530717958647692;
+        let energyOmega = 1.0 / max(f32(n * n), 1.0);
+        let hue = fract(basePhi + simulationTime * (0.9 * energyOmega));
+        return hsvToRgb(hue, 0.88, 0.24 + 0.76 * x);
+    }
 
     return samplePalette6(x,
         vec3f(0.0, 0.0, 0.0),
@@ -393,7 +454,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     let t = intensityAt(samplePos, n, l, m, intensityScale, intensityRange);
 
     output.position = orbital.viewProj * vec4f(samplePos, 1.0);
-    output.color = mapColor(t, colorMode);
+    output.color = mapColor(t, colorMode, samplePos, simulationTime, n, m, omega);
     output.visible = select(1.0, 0.0, hidden);
     return output;
 }

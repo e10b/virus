@@ -16,14 +16,17 @@
 #include "wgfx.h"
 
 struct QuantumState {
-    int n = 2;
-    int l = 1;
-    int m = 0;
+    int n = 9;
+    int l = 3;
+    int m = 1;
     int sampleCount = 100000;
 
     void clamp() {
         n = std::clamp(n, 1, 30);
         l = std::clamp(l, 0, n - 1);
+        if (l == 14) {
+            l = 13;
+        }
         m = std::clamp(m, -l, l);
     }
 };
@@ -35,16 +38,16 @@ struct ClipState {
 
 class OrbitCamera {
 public:
-    glm::vec3 target = glm::vec3(0.0f);
-    float radius = 50.0f;
-    float azimuth = 0.0f;
-    float elevation = 3.14159265358979323846f / 2.0f;
+    glm::vec3 target = glm::vec3(-40.050f, 1.792f, 21.270f);
+    float radius = 548.800f;
+    float azimuth = 1.051212f;   // 60.23 deg
+    float elevation = 1.378810f; // 79.00 deg
     float orbitSpeed = 0.01f;
     float zoomSpeed = 10.0f;
 
     glm::vec3 position() const {
         float e = glm::clamp(elevation, 0.01f, 3.14159265358979323846f - 0.01f);
-        return glm::vec3(
+        return target + glm::vec3(
             radius * std::sin(e) * std::cos(azimuth),
             radius * std::cos(e),
             radius * std::sin(e) * std::sin(azimuth)
@@ -156,14 +159,26 @@ public:
         float flowSpeed = flowSpeed_;
         float intensityRange = intensityRange_;
 
-        ImGui::SliderInt("n", &n, 1, 30);
-        l = std::clamp(l, 0, n - 1);
-        ImGui::SliderInt("l", &l, 0, std::max(0, n - 1));
+        constexpr int kMaxN = 30;
+        ImGui::SliderInt("n", &n, 1, kMaxN);
+        // Let l be adjusted independently; n is auto-raised below so l<n remains valid.
+        ImGui::SliderInt("l", &l, 0, kMaxN - 1);
+        if (l >= n) {
+            n = std::min(kMaxN, l + 1);
+            l = std::min(l, n - 1);
+        }
         m = std::clamp(m, -l, l);
         ImGui::SliderInt("m", &m, -std::max(1, l), std::max(1, l));
         ImGui::SliderInt("samples", &count, 1000, kMaxParticles);
+        ImGui::Text("Constraint: l < n (n auto-increases when needed)");
 
-        ImGui::Combo("colorspace", &colorMode, "Inferno\0Magma\0Plasma\0Viridis\0Cividis\0Turbo\0Gray\0Fire\0Cyan-Magenta\0");
+        ImGui::Combo("colorspace", &colorMode, "Inferno\0Magma\0Plasma\0Viridis\0Cividis\0Turbo\0Gray\0Fire\0Cyan-Magenta\0Phase Velocity\0Stationary Phase\0");
+        if (colorMode == 9) {
+            ImGui::TextWrapped("Phase Velocity: Colors cycle through the spectrum; faster local color cycling indicates higher local momentum/energy.");
+        }
+        if (colorMode == 10) {
+            ImGui::TextWrapped("Stationary Phase: The orbital phase rotates coherently over time (global e^{-iEt/hbar} style evolution).");
+        }
 
         ImGui::Separator();
         ImGui::Text("Selected octant is removed");
@@ -171,7 +186,7 @@ public:
         ImGui::SliderInt("removed octant", &octant, 1, 8);
 
         ImGui::SliderFloat("intensity scale", &intensityScale_, 0.1f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
-        ImGui::SliderFloat("intensity range", &intensityRange, 0.05f, 2.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+        ImGui::SliderFloat("intensity range", &intensityRange, 0.05f, 50.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
         ImGui::SliderFloat("flow speed", &flowSpeed, 0.0f, 8.0f, "%.2f");
 
         quantum_.n = n;
@@ -179,9 +194,9 @@ public:
         quantum_.m = m;
         quantum_.sampleCount = std::clamp(count, 1000, kMaxParticles);
         quantum_.clamp();
-        colorMode_ = std::clamp(colorMode, 0, 8);
+        colorMode_ = std::clamp(colorMode, 0, 10);
         flowSpeed_ = std::max(0.0f, flowSpeed);
-        intensityRange_ = std::clamp(intensityRange, 0.01f, 10.0f);
+        intensityRange_ = std::clamp(intensityRange, 0.01f, 50.0f);
 
         if (oldN != quantum_.n || oldL != quantum_.l || oldM != quantum_.m) {
             sampleSeed_ += 1.0f;
@@ -196,6 +211,16 @@ public:
         ImGui::SameLine();
         if (ImGui::Button("Reset motion phase")) {
             simulationTime_ = 0.0f;
+        }
+
+        if (ImGui::CollapsingHeader("Debug Camera", ImGuiTreeNodeFlags_DefaultOpen)) {
+            const glm::vec3 camPos = camera_.position();
+            const float azimuthDeg = camera_.azimuth * 57.29577951308232f;
+            const float elevationDeg = camera_.elevation * 57.29577951308232f;
+            ImGui::Text("position: (%.3f, %.3f, %.3f)", camPos.x, camPos.y, camPos.z);
+            ImGui::Text("target:   (%.3f, %.3f, %.3f)", camera_.target.x, camera_.target.y, camera_.target.z);
+            ImGui::Text("rotation: azimuth %.2f deg, elevation %.2f deg", azimuthDeg, elevationDeg);
+            ImGui::Text("radius: %.3f", camera_.radius);
         }
 
         ImGui::Text("Default removes octant 1 at origin (0,0,0)");
@@ -220,12 +245,12 @@ private:
     QuantumState quantum_;
     ClipState clip_;
 
-    int colorMode_ = 0;
-    float intensityScale_ = 1.0f;
-    float intensityRange_ = 0.35f;
+    int colorMode_ = 3;
+    float intensityScale_ = 18.44f;
+    float intensityRange_ = 0.337f;
     float sampleSeed_ = 1.0f;
     float simulationTime_ = 0.0f;
-    float flowSpeed_ = 1.0f;
+    float flowSpeed_ = 8.0f;
 
     GpuOrbitalState gpuState_{};
 
