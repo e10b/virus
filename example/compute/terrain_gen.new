@@ -1,0 +1,744 @@
+#include "terrain_generator.h"
+
+#include <climits>
+#include <cstring>
+#include <glm/gtc/noise.hpp>
+
+uint32_t VoxelCompute::packRGB(uint8_t r, uint8_t g, uint8_t b) {
+    return (uint32_t(r) << 16) | (uint32_t(g) << 8) | uint32_t(b);
+}
+
+float VoxelCompute::fbm2D(glm::vec2 pos, int octaves, float lacunarity, float gain) const {
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float sum = 0.0f;
+    float normalizer = 0.0f;
+
+    for (int octave = 0; octave < octaves; ++octave) {
+        sum += glm::simplex(pos * frequency) * amplitude;
+        normalizer += amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return normalizer > 0.0f ? sum / normalizer : 0.0f;
+}
+
+float VoxelCompute::ridgeFbm2D(glm::vec2 pos, int octaves, float lacunarity, float gain) const {
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float sum = 0.0f;
+    float normalizer = 0.0f;
+
+    for (int octave = 0; octave < octaves; ++octave) {
+        float n = 1.0f - glm::abs(glm::simplex(pos * frequency));
+        n *= n;
+        sum += n * amplitude;
+        normalizer += amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return normalizer > 0.0f ? sum / normalizer : 0.0f;
+}
+
+float VoxelCompute::fbm3D(glm::vec3 pos, int octaves, float lacunarity, float gain) const {
+    float amplitude = 1.0f;
+    float frequency = 1.0f;
+    float sum = 0.0f;
+    float normalizer = 0.0f;
+
+    for (int octave = 0; octave < octaves; ++octave) {
+        sum += glm::simplex(pos * frequency) * amplitude;
+        normalizer += amplitude;
+        frequency *= lacunarity;
+        amplitude *= gain;
+    }
+
+    return normalizer > 0.0f ? sum / normalizer : 0.0f;
+}
+
+int VoxelCompute::sampleTerrainHeight(int x, int z) const {
+    glm::vec2 pos{float(x), float(z)};
+    
+    // Multi-octave Perlin noise (Minecraft-style) for realistic terrain
+    // Octave 1: Large-scale terrain features (1/512 frequency)
+    float octave1 = fbm2D(pos * 0.00195f, 2, 2.0f, 0.5f);
+    
+    // Octave 2: Medium-scale variation (1/256 frequency)
+    float octave2 = fbm2D(pos * 0.00391f, 3, 2.0f, 0.5f);
+    
+    // Octave 3: Small-scale detail (1/128 frequency)
+    float octave3 = fbm2D(pos * 0.00781f, 3, 2.0f, 0.5f);
+    
+    // Combine with proper amplitude scaling - increased variation
+    float terrainNoise = (octave1 * 50.0f + octave2 * 40.0f + octave3 * 20.0f) / 110.0f;
+    
+    // Biome selector: low-frequency noise determines region type
+    float biomeNoise = fbm2D(pos * 0.0002f, 3, 2.0f, 0.5f);
+    
+    // Biome masks - adjust ranges for better distribution
+    float plainsMask = glm::smoothstep(-0.7f, -0.1f, biomeNoise);        // More plains
+    float hillMask = glm::smoothstep(-0.4f, 0.3f, biomeNoise);            // Rolling hills
+    float mountainMask = glm::smoothstep(0.25f, 0.9f, biomeNoise);       // Mountains
+    
+    // Normalize masks
+    float totalMask = plainsMask + hillMask + mountainMask;
+    if (totalMask > 0.01f) {
+        plainsMask /= totalMask;
+        hillMask /= totalMask;
+        mountainMask /= totalMask;
+    }
+    
+    // Base elevations and terrain scales per biome - more variation
+    float plainsHeight = 50.0f + terrainNoise * 40.0f;                    // 10-90 voxels with more peaks/valleys
+    float hillHeight = 80.0f + terrainNoise * 160.0f;                     // 20-240 voxels, more dramatic
+    float mountainHeight = 200.0f + terrainNoise * 500.0f;                // 100-700 voxels
+    
+    // Blend biome heights
+    float height = plainsMask * plainsHeight + 
+                   hillMask * hillHeight + 
+                   mountainMask * mountainHeight;
+
+    return std::max(6, static_cast<int>(height));
+}
+
+uint16_t VoxelCompute::chooseTerrainMaterial(
+    int x,
+    int y,
+    int z,
+    int surfaceY,
+    int dx,
+    int dz,
+    int minTerrainHeight,
+    int maxTerrainHeight) const {
+    
+    int slope = glm::clamp(glm::abs(dx) + glm::abs(dz), 0, 64);
+    float slopeNorm = float(slope) / 64.0f;
+    float elevation = float(surfaceY);
+    
+    // Lower frequency = larger, more cohesive patches
+    float grassVar = 0.5f + 0.5f * glm::simplex(glm::vec2(float(x), float(z)) * 0.01f + glm::vec2(17.0f, 93.0f));
+    float stoneVar = 0.5f + 0.5f * glm::simplex(glm::vec2(float(x), float(z)) * 0.02f + glm::vec2(43.0f, 71.0f));
+    
+    int depthFromSurface = surfaceY - y;
+    
+    // === SURFACE LAYER ===
+    if (depthFromSurface == 1) {
+        // Snow peaks (elevation > 400)
+        if (elevation > 400.0f) {
+            return 5;  // Snow
+        }
+        // High mountains (250-400): mostly stone/rock
+        else if (elevation > 250.0f) {
+            if (slopeNorm > 0.6f) {
+                return 6;  // Dark rock on steep faces
+            } else {
+                // Mountain slopes mostly grass with occasional moss
+                return grassVar > 0.4f ? 2 : 7;
+            }
+        }
+        // Mid-elevation foothills (120-250): GREEN
+        else if (elevation > 120.0f) {
+            if (slopeNorm > 0.7f) {
+                return 4;  // Stone only on very steep cliffs
+            }
+            // Heavily favor grass - occasional moss for texture
+            return grassVar > 0.3f ? 2 : 7;
+        }
+        // Lowlands (< 120): LUSH GREEN
+        else {
+            if (slopeNorm > 0.75f) {
+                return 3;  // Dirt only on extreme slopes
+            }
+            // Almost all grass with rare moss patches
+            return grassVar > 0.15f ? 2 : 7;
+        }
+    }
+    
+    // === SUBSURFACE (1-4 blocks down) ===
+    else if (depthFromSurface <= 4) {
+        if (elevation > 250.0f) {
+            return stoneVar > 0.5f ? 4 : 6;
+        } else {
+            // Mostly dirt under grass, minimal moss variation
+            return 3;
+        }
+    }
+    
+    // === DEEP (>4 blocks) ===
+    else {
+        return stoneVar > 0.5f ? 4 : 6;
+    }
+}
+
+void VoxelCompute::initializeTerrainStreaming() {
+    residentGlobalToLocal.clear();
+    residentLocalToGlobal.clear();
+    generatedSectorVoxelData.clear();
+    terrainStreamedSectorCount = 0;
+
+    sectorBoundsData[0] = 0;
+    sectorBoundsData[1] = 0;
+    sectorBoundsData[2] = 0;
+    sectorBoundsData[3] = 0;
+    sectorBoundsData[4] = 0;
+    sectorBoundsData[5] = 0;
+    sectorBoundsData[6] = 0;
+    sectorBoundsData[7] = 0;
+}
+
+void VoxelCompute::updateResidentSectorBounds() {
+    int minX = INT_MAX;
+    int minY = INT_MAX;
+    int minZ = INT_MAX;
+    int maxX = INT_MIN;
+    int maxY = INT_MIN;
+    int maxZ = INT_MIN;
+    bool hasResident = false;
+
+    for (int i = 0; i < sectorCount; ++i) {
+        if (sectorCoordMap[i * 4 + 3] == 0) {
+            continue;
+        }
+
+        const int sx = sectorCoordMap[i * 4 + 0];
+        const int sy = sectorCoordMap[i * 4 + 1];
+        const int sz = sectorCoordMap[i * 4 + 2];
+
+        minX = std::min(minX, sx);
+        minY = std::min(minY, sy);
+        minZ = std::min(minZ, sz);
+        maxX = std::max(maxX, sx);
+        maxY = std::max(maxY, sy);
+        maxZ = std::max(maxZ, sz);
+        hasResident = true;
+    }
+
+    if (!hasResident) {
+        sectorBoundsData[0] = 0;
+        sectorBoundsData[1] = 0;
+        sectorBoundsData[2] = 0;
+        sectorBoundsData[3] = 0;
+        sectorBoundsData[4] = 0;
+        sectorBoundsData[5] = 0;
+        sectorBoundsData[6] = 0;
+        sectorBoundsData[7] = 0;
+    } else {
+        sectorBoundsData[0] = minX;
+        sectorBoundsData[1] = minY;
+        sectorBoundsData[2] = minZ;
+        sectorBoundsData[3] = 1;
+        sectorBoundsData[4] = maxX;
+        sectorBoundsData[5] = maxY;
+        sectorBoundsData[6] = maxZ;
+        sectorBoundsData[7] = 0;
+    }
+
+    if (compute && sectorBoundsUniform) {
+        compute->updateStorageBuffer(sectorBoundsUniform, sectorBoundsData, 8 * sizeof(int32_t), 0);
+    }
+}
+
+std::string VoxelCompute::makeSectorKey(int sectorX, int sectorY, int sectorZ) const {
+    return std::to_string(sectorX) + ":" + std::to_string(sectorY) + ":" + std::to_string(sectorZ);
+}
+
+uint64_t VoxelCompute::packLocalSectorKey(int localSectorX, int localSectorY, int localSectorZ) const {
+    return static_cast<uint64_t>(localSectorX) |
+           (static_cast<uint64_t>(localSectorY) << 16u) |
+           (static_cast<uint64_t>(localSectorZ) << 32u);
+}
+
+int VoxelCompute::wrapSectorCoord(int sectorCoord) const {
+    int wrapped = sectorCoord % sectorsPerDimension;
+    if (wrapped < 0) {
+        wrapped += sectorsPerDimension;
+    }
+    return wrapped;
+}
+
+void VoxelCompute::clearLocalSectorSlot(int localSectorX, int localSectorY, int localSectorZ) {
+    const int localSectorIndex =
+        localSectorX +
+        localSectorY * sectorsPerDimension +
+        localSectorZ * sectorsPerDimension * sectorsPerDimension;
+
+    const int topStartX = localSectorX * bricksPerSector;
+    const int topStartY = localSectorY * bricksPerSector;
+    const int topStartZ = localSectorZ * bricksPerSector;
+
+    for (int localTopZ = 0; localTopZ < bricksPerSector; ++localTopZ) {
+        for (int localTopY = 0; localTopY < bricksPerSector; ++localTopY) {
+            for (int localTopX = 0; localTopX < bricksPerSector; ++localTopX) {
+                const int topX = topStartX + localTopX;
+                const int topY = topStartY + localTopY;
+                const int topZ = topStartZ + localTopZ;
+                if (topX < 0 || topX >= topLevelSize ||
+                    topY < 0 || topY >= topLevelSize ||
+                    topZ < 0 || topZ >= topLevelSize) {
+                    continue;
+                }
+
+                const size_t topIndex = static_cast<size_t>(topX) +
+                                        static_cast<size_t>(topY) * static_cast<size_t>(topLevelSize) +
+                                        static_cast<size_t>(topZ) * static_cast<size_t>(topLevelSize) *
+                                            static_cast<size_t>(topLevelSize);
+                const uint32_t topEntry = topLevelGrid[topIndex];
+                if ((topEntry & IS_BRICK_FLAG) != 0u) {
+                    freeBrickInternal(topEntry & BRICK_INDEX_MASK);
+                }
+                topLevelGrid[topIndex] = 0u;
+                queueTopLevelUpdate(topX * brickSize, topY * brickSize, topZ * brickSize);
+            }
+        }
+    }
+
+    sectorCoordMap[localSectorIndex * 4 + 3] = 0;
+    if (compute && sectorCoordUniform) {
+        compute->updateStorageBuffer(
+            sectorCoordUniform,
+            &sectorCoordMap[localSectorIndex * 4],
+            4 * sizeof(int32_t),
+            static_cast<size_t>(localSectorIndex) * 4 * sizeof(int32_t));
+    }
+
+    sectorMapDirty = true;
+}
+
+void VoxelCompute::ensureSectorResident(int globalSectorX, int globalSectorY, int globalSectorZ) {
+    const std::string globalKey = makeSectorKey(globalSectorX, globalSectorY, globalSectorZ);
+    if (residentGlobalToLocal.find(globalKey) != residentGlobalToLocal.end()) {
+        return;
+    }
+
+    const int localSectorX = wrapSectorCoord(globalSectorX);
+    const int localSectorY = wrapSectorCoord(globalSectorY);
+    const int localSectorZ = wrapSectorCoord(globalSectorZ);
+    const uint64_t localKey = packLocalSectorKey(localSectorX, localSectorY, localSectorZ);
+
+    const auto occupied = residentLocalToGlobal.find(localKey);
+    if (occupied != residentLocalToGlobal.end() && occupied->second != globalKey) {
+        residentGlobalToLocal.erase(occupied->second);
+        clearLocalSectorSlot(localSectorX, localSectorY, localSectorZ);
+    }
+
+    residentGlobalToLocal[globalKey] = localKey;
+    residentLocalToGlobal[localKey] = globalKey;
+
+    const int localSectorIndex =
+        localSectorX +
+        localSectorY * sectorsPerDimension +
+        localSectorZ * sectorsPerDimension * sectorsPerDimension;
+    sectorCoordMap[localSectorIndex * 4 + 0] = globalSectorX;
+    sectorCoordMap[localSectorIndex * 4 + 1] = globalSectorY;
+    sectorCoordMap[localSectorIndex * 4 + 2] = globalSectorZ;
+    sectorCoordMap[localSectorIndex * 4 + 3] = 1;
+    if (compute && sectorCoordUniform) {
+        compute->updateStorageBuffer(
+            sectorCoordUniform,
+            &sectorCoordMap[localSectorIndex * 4],
+            4 * sizeof(int32_t),
+            static_cast<size_t>(localSectorIndex) * 4 * sizeof(int32_t));
+    }
+
+    const auto cachedSector = generatedSectorVoxelData.find(globalKey);
+    if (cachedSector != generatedSectorVoxelData.end()) {
+        const int localStartX = localSectorX * sectorSize;
+        const int localStartY = localSectorY * sectorSize;
+        const int localStartZ = localSectorZ * sectorSize;
+
+        auto voxelIndex = [this](int lx, int ly, int lz) {
+            return static_cast<size_t>(lx) +
+                   static_cast<size_t>(ly) * static_cast<size_t>(sectorSize) +
+                   static_cast<size_t>(lz) * static_cast<size_t>(sectorSize) * static_cast<size_t>(sectorSize);
+        };
+
+        std::lock_guard<std::mutex> lock(brickMutex);
+        for (int lz = 0; lz < sectorSize; ++lz) {
+            for (int ly = 0; ly < sectorSize; ++ly) {
+                for (int lx = 0; lx < sectorSize; ++lx) {
+                    const uint16_t material = cachedSector->second[voxelIndex(lx, ly, lz)];
+                    if (material == 0u) {
+                        continue;
+                    }
+
+                    const int worldX = localStartX + lx;
+                    const int worldY = localStartY + ly;
+                    const int worldZ = localStartZ + lz;
+                    setVoxelInternal(worldX, worldY, worldZ, material, false);
+                }
+            }
+        }
+
+        const int topStartX = localSectorX * bricksPerSector;
+        const int topStartY = localSectorY * bricksPerSector;
+        const int topStartZ = localSectorZ * bricksPerSector;
+        for (int localTopZ = 0; localTopZ < bricksPerSector; ++localTopZ) {
+            for (int localTopY = 0; localTopY < bricksPerSector; ++localTopY) {
+                for (int localTopX = 0; localTopX < bricksPerSector; ++localTopX) {
+                    const int topX = topStartX + localTopX;
+                    const int topY = topStartY + localTopY;
+                    const int topZ = topStartZ + localTopZ;
+
+                    queueTopLevelUpdate(topX * brickSize, topY * brickSize, topZ * brickSize);
+
+                    const size_t topIndex = static_cast<size_t>(topX) +
+                                            static_cast<size_t>(topY) * static_cast<size_t>(topLevelSize) +
+                                            static_cast<size_t>(topZ) * static_cast<size_t>(topLevelSize) *
+                                                static_cast<size_t>(topLevelSize);
+                    const uint32_t topEntry = topLevelGrid[topIndex];
+                    if ((topEntry & IS_BRICK_FLAG) != 0u) {
+                        BrickUpdate brickUpdate;
+                        brickUpdate.brickIndex = topEntry & BRICK_INDEX_MASK;
+                        memcpy(
+                            brickUpdate.data,
+                            &brickPool[static_cast<size_t>(brickUpdate.brickIndex) * 512],
+                            512 * sizeof(uint16_t));
+                        pendingBrickUpdates.push_back(brickUpdate);
+                    }
+                }
+            }
+        }
+        sectorMapDirty = true;
+    } else {
+        generateProceduralTerrainSector(
+            globalSectorX,
+            globalSectorY,
+            globalSectorZ,
+            localSectorX,
+            localSectorY,
+            localSectorZ);
+    }
+
+    ++terrainStreamedSectorCount;
+}
+
+void VoxelCompute::generateProceduralTerrainSector(
+    int globalSectorX,
+    int globalSectorY,
+    int globalSectorZ,
+    int localSectorX,
+    int localSectorY,
+    int localSectorZ) {
+    const int localStartX = localSectorX * sectorSize;
+    const int localStartY = localSectorY * sectorSize;
+    const int localStartZ = localSectorZ * sectorSize;
+    const int localEndX = std::min(worldSize, localStartX + sectorSize);
+    const int localEndY = std::min(worldSize, localStartY + sectorSize);
+    const int localEndZ = std::min(worldSize, localStartZ + sectorSize);
+
+    const int globalStartY = globalSectorY * sectorSize;
+
+    const int globalStartX = globalSectorX * sectorSize;
+    const int globalStartZ = globalSectorZ * sectorSize;
+
+    std::vector<uint16_t> sectorVoxels(static_cast<size_t>(sectorSize) * sectorSize * sectorSize, 0u);
+    auto voxelIndex = [this](int lx, int ly, int lz) {
+        return static_cast<size_t>(lx) +
+               static_cast<size_t>(ly) * static_cast<size_t>(sectorSize) +
+               static_cast<size_t>(lz) * static_cast<size_t>(sectorSize) * static_cast<size_t>(sectorSize);
+    };
+
+    auto sampleHeightInfinite = [this](int x, int z) {
+        return sampleTerrainHeight(x, z);
+    };
+
+    constexpr int minTerrainHeight = 6;
+    constexpr int maxTerrainHeight = 1024;
+
+    for (int localZ = localStartZ; localZ < localEndZ; ++localZ) {
+        const int globalZ = globalStartZ + (localZ - localStartZ);
+        for (int localX = localStartX; localX < localEndX; ++localX) {
+            const int globalX = globalStartX + (localX - localStartX);
+            const int surfaceY = sampleHeightInfinite(globalX, globalZ);
+            const int globalSectorBottomY = globalStartY;
+            if (surfaceY < globalSectorBottomY) {
+                continue;
+            }
+
+            const int slopeX = std::abs(sampleHeightInfinite(globalX + 1, globalZ) - sampleHeightInfinite(globalX - 1, globalZ));
+            const int slopeZ = std::abs(sampleHeightInfinite(globalX, globalZ + 1) - sampleHeightInfinite(globalX, globalZ - 1));
+            const int maxGlobalFillY = std::min(globalStartY + sectorSize - 1, surfaceY);
+
+            for (int globalY = globalStartY; globalY <= maxGlobalFillY; ++globalY) {
+                const bool nearSurface = (surfaceY - globalY) < 9;
+                if (!nearSurface && globalY > 24) {
+                    const float caveNoise = fbm3D(glm::vec3(float(globalX), float(globalY), float(globalZ)) * 0.035f, 3, 2.0f, 0.52f);
+                    if (caveNoise > 0.36f) {
+                        continue;
+                    }
+                }
+
+                const uint16_t material = chooseTerrainMaterial(
+                    globalX,
+                    globalY,
+                    globalZ,
+                    surfaceY,
+                    slopeX,
+                    slopeZ,
+                    minTerrainHeight,
+                    maxTerrainHeight);
+                const int localY = localStartY + (globalY - globalStartY);
+                if (localY < localStartY || localY >= localEndY) {
+                    continue;
+                }
+
+                setVoxelInternal(localX, localY, localZ, material, false);
+                const int lx = localX - localStartX;
+                const int ly = localY - localStartY;
+                const int lz = localZ - localStartZ;
+                if (lx >= 0 && lx < sectorSize && ly >= 0 && ly < sectorSize && lz >= 0 && lz < sectorSize) {
+                    sectorVoxels[voxelIndex(lx, ly, lz)] = material;
+                }
+            }
+        }
+    }
+
+    const int topStartX = localSectorX * bricksPerSector;
+    const int topStartY = localSectorY * bricksPerSector;
+    const int topStartZ = localSectorZ * bricksPerSector;
+    for (int localTopZ = 0; localTopZ < bricksPerSector; ++localTopZ) {
+        for (int localTopY = 0; localTopY < bricksPerSector; ++localTopY) {
+            for (int localTopX = 0; localTopX < bricksPerSector; ++localTopX) {
+                const int topX = topStartX + localTopX;
+                const int topY = topStartY + localTopY;
+                const int topZ = topStartZ + localTopZ;
+                if (topX < 0 || topX >= topLevelSize ||
+                    topY < 0 || topY >= topLevelSize ||
+                    topZ < 0 || topZ >= topLevelSize) {
+                    continue;
+                }
+
+                queueTopLevelUpdate(topX * brickSize, topY * brickSize, topZ * brickSize);
+
+                const size_t topIndex = static_cast<size_t>(topX) +
+                                        static_cast<size_t>(topY) * static_cast<size_t>(topLevelSize) +
+                                        static_cast<size_t>(topZ) * static_cast<size_t>(topLevelSize) *
+                                            static_cast<size_t>(topLevelSize);
+                const uint32_t topEntry = topLevelGrid[topIndex];
+                if ((topEntry & IS_BRICK_FLAG) != 0u) {
+                    BrickUpdate brickUpdate;
+                    brickUpdate.brickIndex = topEntry & BRICK_INDEX_MASK;
+                    memcpy(
+                        brickUpdate.data,
+                        &brickPool[static_cast<size_t>(brickUpdate.brickIndex) * 512],
+                        512 * sizeof(uint16_t));
+                    pendingBrickUpdates.push_back(brickUpdate);
+                }
+            }
+        }
+    }
+
+    const std::string globalKey = makeSectorKey(globalSectorX, globalSectorY, globalSectorZ);
+    generatedSectorVoxelData[globalKey] = std::move(sectorVoxels);
+    sectorMapDirty = true;
+}
+
+void VoxelCompute::streamTerrainAroundPlayer(const glm::vec3& cameraPos) {
+    if (!terrainStreamingEnabled) {
+        return;
+    }
+
+    const int centerSectorX = static_cast<int>(std::floor(cameraPos.x / static_cast<float>(sectorSize)));
+    const int centerSectorY = static_cast<int>(std::floor(cameraPos.y / static_cast<float>(sectorSize)));
+    const int centerSectorZ = static_cast<int>(std::floor(cameraPos.z / static_cast<float>(sectorSize)));
+
+    const int radius = std::max(1, terrainStreamRadiusSectors);
+    const int radiusSq = radius * radius;
+    const int sectorsPerFrame = std::max(1, static_cast<int>(World::renderSpeed));
+
+    std::vector<std::pair<uint64_t, std::string>> sectorsToEvict;
+    sectorsToEvict.reserve(residentLocalToGlobal.size());
+    for (const auto& residentEntry : residentLocalToGlobal) {
+        const uint64_t localKey = residentEntry.first;
+        const int localSectorX = static_cast<int>(localKey & 0xFFFFu);
+        const int localSectorY = static_cast<int>((localKey >> 16u) & 0xFFFFu);
+        const int localSectorZ = static_cast<int>((localKey >> 32u) & 0xFFFFu);
+        const int localSectorIndex =
+            localSectorX +
+            localSectorY * sectorsPerDimension +
+            localSectorZ * sectorsPerDimension * sectorsPerDimension;
+
+        if (sectorCoordMap[localSectorIndex * 4 + 3] == 0) {
+            sectorsToEvict.emplace_back(localKey, residentEntry.second);
+            continue;
+        }
+
+        const int globalSectorX = sectorCoordMap[localSectorIndex * 4 + 0];
+        const int globalSectorY = sectorCoordMap[localSectorIndex * 4 + 1];
+        const int globalSectorZ = sectorCoordMap[localSectorIndex * 4 + 2];
+
+        const int dx = globalSectorX - centerSectorX;
+        const int dy = globalSectorY - centerSectorY;
+        const int dz = globalSectorZ - centerSectorZ;
+        const int distSq = dx * dx + dy * dy + dz * dz;
+        if (distSq > radiusSq) {
+            sectorsToEvict.emplace_back(localKey, residentEntry.second);
+        }
+    }
+
+    int evictedThisFrame = 0;
+    for (const auto& evictEntry : sectorsToEvict) {
+        const uint64_t localKey = evictEntry.first;
+        const int localSectorX = static_cast<int>(localKey & 0xFFFFu);
+        const int localSectorY = static_cast<int>((localKey >> 16u) & 0xFFFFu);
+        const int localSectorZ = static_cast<int>((localKey >> 32u) & 0xFFFFu);
+
+        residentGlobalToLocal.erase(evictEntry.second);
+        residentLocalToGlobal.erase(localKey);
+        clearLocalSectorSlot(localSectorX, localSectorY, localSectorZ);
+        ++evictedThisFrame;
+    }
+
+    int generatedThisFrame = 0;
+    for (int i = 0; i < sectorsPerFrame; ++i) {
+        bool foundCandidate = false;
+        int bestSectorX = 0;
+        int bestSectorY = 0;
+        int bestSectorZ = 0;
+        int bestDistSq = 0;
+
+        for (int dz = -radius; dz <= radius; ++dz) {
+            const int sectorZ = centerSectorZ + dz;
+
+            for (int dy = -radius; dy <= radius; ++dy) {
+                const int sectorY = centerSectorY + dy;
+
+                for (int dx = -radius; dx <= radius; ++dx) {
+                    const int distSq = dx * dx + dy * dy + dz * dz;
+                    if (distSq > radiusSq) {
+                        continue;
+                    }
+
+                    const int sectorX = centerSectorX + dx;
+                    const std::string globalKey = makeSectorKey(sectorX, sectorY, sectorZ);
+                    if (residentGlobalToLocal.find(globalKey) != residentGlobalToLocal.end()) {
+                        continue;
+                    }
+
+                    if (!foundCandidate || distSq < bestDistSq) {
+                        bestSectorX = sectorX;
+                        bestSectorY = sectorY;
+                        bestSectorZ = sectorZ;
+                        bestDistSq = distSq;
+                        foundCandidate = true;
+                    }
+                }
+            }
+        }
+
+        if (!foundCandidate) {
+            break;
+        }
+
+        ensureSectorResident(bestSectorX, bestSectorY, bestSectorZ);
+        ++generatedThisFrame;
+    }
+
+    updateResidentSectorBounds();
+
+    if ((generatedThisFrame > 0 || evictedThisFrame > 0) && (terrainStreamedSectorCount % 64u) == 0u) {
+        printf("Terrain streaming loads: %zu sectors (resident=%zu, generated=%zu, evicted=%d, cacheSlots=%d)\n",
+               terrainStreamedSectorCount,
+               residentGlobalToLocal.size(),
+               generatedSectorVoxelData.size(),
+               evictedThisFrame,
+               sectorCount);
+    }
+}
+
+void VoxelCompute::generateProceduralTerrain() {
+    initializeTerrainPalette();
+
+    constexpr int surfaceBandThickness = 14;
+    const uint32_t deepRockColor = packRGB(88, 92, 98);
+
+    std::vector<uint16_t> heightMap(worldSize * worldSize);
+    int minTerrainHeight = worldSize;
+    int maxTerrainHeight = 0;
+    std::vector<int> solidBaseHeights(topLevelSize * topLevelSize, 0);
+
+    auto heightIndex = [this](int x, int z) {
+        return x + z * worldSize;
+    };
+
+    for (int z = 0; z < worldSize; ++z) {
+        for (int x = 0; x < worldSize; ++x) {
+            const int h = sampleTerrainHeight(x, z);
+            heightMap[heightIndex(x, z)] = static_cast<uint16_t>(h);
+            minTerrainHeight = std::min(minTerrainHeight, h);
+            maxTerrainHeight = std::max(maxTerrainHeight, h);
+        }
+    }
+
+    auto getHeight = [&](int x, int z) -> int {
+        x = glm::clamp(x, 0, worldSize - 1);
+        z = glm::clamp(z, 0, worldSize - 1);
+        return heightMap[heightIndex(x, z)];
+    };
+
+    for (int topZ = 0; topZ < topLevelSize; ++topZ) {
+        for (int topX = 0; topX < topLevelSize; ++topX) {
+            int minHeight = worldSize;
+            for (int localZ = 0; localZ < brickSize; ++localZ) {
+                for (int localX = 0; localX < brickSize; ++localX) {
+                    int worldX = topX * brickSize + localX;
+                    int worldZ = topZ * brickSize + localZ;
+                    minHeight = std::min(minHeight, getHeight(worldX, worldZ));
+                }
+            }
+
+            int detailStart = std::max(0, minHeight - surfaceBandThickness);
+            int fullySolidCells = std::max(0, (detailStart + 1) / brickSize);
+            solidBaseHeights[topX + topZ * topLevelSize] = fullySolidCells * brickSize;
+
+            for (int topY = 0; topY < fullySolidCells; ++topY) {
+                size_t topIndex = topX + topY * topLevelSize + topZ * topLevelSize * topLevelSize;
+                topLevelGrid[topIndex] = deepRockColor;
+            }
+        }
+    }
+
+    size_t detailedVoxels = 0;
+    for (int z = 0; z < worldSize; ++z) {
+        for (int x = 0; x < worldSize; ++x) {
+            int surfaceY = getHeight(x, z);
+            int slopeX = std::abs(getHeight(x + 1, z) - getHeight(x - 1, z));
+            int slopeZ = std::abs(getHeight(x, z + 1) - getHeight(x, z - 1));
+            int baseY = solidBaseHeights[(x / brickSize) + (z / brickSize) * topLevelSize];
+
+            for (int y = baseY; y <= surfaceY; ++y) {
+                bool nearSurface = (surfaceY - y) < 9;
+                if (!nearSurface && y > 24) {
+                    float caveNoise = fbm3D(glm::vec3(float(x), float(y), float(z)) * 0.035f, 3, 2.0f, 0.52f);
+                    if (caveNoise > 0.36f) {
+                        continue;
+                    }
+                }
+
+                uint16_t material = chooseTerrainMaterial(
+                    x,
+                    y,
+                    z,
+                    surfaceY,
+                    slopeX,
+                    slopeZ,
+                    minTerrainHeight,
+                    maxTerrainHeight);
+                setVoxelInternal(x, y, z, material, false);
+                detailedVoxels++;
+            }
+        }
+    }
+
+    printf("Generated procedural terrain with %zu detailed voxels\n", detailedVoxels);
+}
+
+namespace compute_layers {
+
+void generateProceduralTerrain(VoxelCompute& volume) {
+    volume.generateProceduralTerrain();
+}
+
+} // namespace compute_layers

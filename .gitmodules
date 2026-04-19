@@ -1,0 +1,21 @@
+[submodule "deps/enet"]
+	path = deps/enet
+	url = git@github.com:lsalzman/enet.git
+[submodule "deps/glm"]
+	path = deps/glm
+	url = git@github.com:g-truc/glm.git
+[submodule "deps/webgpu"]
+	path = deps/webgpu
+	url = git@github.com:eliemichel/WebGPU-distribution.git
+[submodule "deps/sdl3"]
+	path = deps/sdl3
+	url = git@github.com:libsdl-org/SDL.git
+[submodule "deps/leveldb"]
+	path = deps/leveldb
+	url = git@github.com:google/leveldb.git
+[submodule "deps/fastgltf"]
+	path = deps/fastgltf
+	url = git@github.com:spnda/fastgltf.git
+[submodule "deps/wgfx"]
+	path = deps/wgfx
+	url = git@github.com:Vyscosity/wgfx.git
