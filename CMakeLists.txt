@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.5...3.25)
-project(wegs VERSION 0.1.0 LANGUAGES CXX C)
+project(atoms VERSION 0.1.0 LANGUAGES CXX C)
 
 #add_subdirectory(deps/sdl)
 #add_subdirectory(deps/webgpu)
@@ -20,9 +20,8 @@ add_subdirectory(deps)
 set(src
 	example/context.cpp
 	example/clock.cpp
-	example/stb_image_impl.cpp
 )
-file(GLOB_RECURSE srcc CONFIGURE_DEPENDS "src/*.cpp") #intriguing..
+file(GLOB_RECURSE srcc CONFIGURE_DEPENDS "deps/wgfx/src/*.cpp")
 
 add_executable( App ${src} ${srcc} example/main.cpp )
  #"sdl2webgpu/sdl2webgpu.c" "sdl2webgpu/sdl2webgpu.h")
@@ -43,7 +42,7 @@ else()
 endif()
 
 target_link_libraries(App PRIVATE webgpu sdl2webgpu SDL3-static glm::glm)
-target_include_directories(App PRIVATE src "deps/sdl3/include" "deps")
+target_include_directories(App PRIVATE "deps/wgfx/src" "deps/sdl3/include" "deps")
 
 target_copy_webgpu_binaries(App)
 

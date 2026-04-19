@@ -41,7 +41,6 @@ int main()
 		context.update();
 
 		wgfx::touch(color);
-		wgfx::start();
 
 		// Render the fullscreen quad with analytic sphere ray tracing in fragment WGSL.
 		pass.prepare();

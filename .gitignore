@@ -3,4 +3,7 @@ out/
 build/
 .cache/
 
-ressavemeplease/
+ressavemeplease/build/
+out/
+.cache/
+.DS_Store
