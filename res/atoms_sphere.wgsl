@@ -266,7 +266,11 @@ fn intensityAt(pos: vec3f, n: i32, l: i32, m: i32, intensityScale: f32, intensit
     let x = cos(theta);
     let mAbs = abs(m);
     let plm = associatedLegendre(l, mAbs, x);
-    let angular = plm * plm;
+    // Use normalized spherical-harmonic magnitude so brightness is consistent across m.
+    let angNum = factorialInt(max(l - mAbs, 0));
+    let angDen = max(factorialInt(max(l + mAbs, 0)), 1e-8);
+    let yNorm = (f32(2 * l + 1) / (4.0 * 3.14159265358979323846)) * (angNum / angDen);
+    let angular = yNorm * plm * plm;
 
     let raw = radialP * angular;
     // Keep brightness roughly consistent as n grows without washing out to white.
@@ -276,28 +280,87 @@ fn intensityAt(pos: vec3f, n: i32, l: i32, m: i32, intensityScale: f32, intensit
     return clamp(scaled / (scaled + max(intensityRange, 0.0001)), 0.0, 1.0);
 }
 
-fn mapColor(t: f32, colorMode: i32) -> vec3f {
-    let x = clamp(t, 0.0, 1.0);
-    if (colorMode == 1) {
-        return vec3f(x, x, x);
-    }
-    if (colorMode == 2) {
-        return vec3f(0.2 + 0.8 * x, 1.0 - 0.6 * x, 1.0);
-    }
-
-    let c0 = vec3f(0.0, 0.0, 0.0);
-    let c1 = vec3f(0.5, 0.0, 0.99);
-    let c2 = vec3f(0.8, 0.0, 0.0);
-    let c3 = vec3f(1.0, 0.5, 0.0);
-    let c4 = vec3f(1.0, 1.0, 0.0);
-    let c5 = vec3f(1.0, 1.0, 1.0);
-
-    let u = x * 5.0;
+fn samplePalette6(x: f32, c0: vec3f, c1: vec3f, c2: vec3f, c3: vec3f, c4: vec3f, c5: vec3f) -> vec3f {
+    let u = clamp(x, 0.0, 1.0) * 5.0;
     if (u < 1.0) { return c0 + u * (c1 - c0); }
     if (u < 2.0) { return c1 + (u - 1.0) * (c2 - c1); }
     if (u < 3.0) { return c2 + (u - 2.0) * (c3 - c2); }
     if (u < 4.0) { return c3 + (u - 3.0) * (c4 - c3); }
     return c4 + (u - 4.0) * (c5 - c4);
+}
+
+fn mapColor(t: f32, colorMode: i32) -> vec3f {
+    let x = clamp(t, 0.0, 1.0);
+    // 0: Inferno, 1: Magma, 2: Plasma, 3: Viridis, 4: Cividis,
+    // 5: Turbo, 6: Gray, 7: Fire, 8: Cyan-Magenta.
+    if (colorMode == 0) {
+        return samplePalette6(x,
+            vec3f(0.0015, 0.0005, 0.0139),
+            vec3f(0.1462, 0.0449, 0.3374),
+            vec3f(0.3904, 0.1004, 0.5019),
+            vec3f(0.6663, 0.1819, 0.3698),
+            vec3f(0.9018, 0.4251, 0.1081),
+            vec3f(0.9884, 0.9984, 0.6449));
+    }
+    if (colorMode == 1) {
+        return samplePalette6(x,
+            vec3f(0.0015, 0.0005, 0.0139),
+            vec3f(0.1717, 0.0673, 0.3708),
+            vec3f(0.4452, 0.1227, 0.5069),
+            vec3f(0.7164, 0.2150, 0.4753),
+            vec3f(0.9440, 0.3776, 0.3651),
+            vec3f(0.9871, 0.9914, 0.7495));
+    }
+    if (colorMode == 2) {
+        return samplePalette6(x,
+            vec3f(0.0504, 0.0298, 0.5280),
+            vec3f(0.4176, 0.0006, 0.6584),
+            vec3f(0.6928, 0.1651, 0.5645),
+            vec3f(0.8814, 0.3925, 0.3832),
+            vec3f(0.9883, 0.6523, 0.2114),
+            vec3f(0.9400, 0.9752, 0.1313));
+    }
+    if (colorMode == 3) {
+        return samplePalette6(x,
+            vec3f(0.2670, 0.0049, 0.3294),
+            vec3f(0.2539, 0.2653, 0.5300),
+            vec3f(0.1636, 0.4711, 0.5581),
+            vec3f(0.1347, 0.6586, 0.5176),
+            vec3f(0.4775, 0.8214, 0.3182),
+            vec3f(0.9932, 0.9062, 0.1439));
+    }
+    if (colorMode == 4) {
+        return samplePalette6(x,
+            vec3f(0.0000, 0.1262, 0.3015),
+            vec3f(0.2081, 0.2666, 0.4622),
+            vec3f(0.3390, 0.4306, 0.5270),
+            vec3f(0.4887, 0.5864, 0.5053),
+            vec3f(0.6785, 0.7335, 0.3791),
+            vec3f(0.9957, 0.9093, 0.2178));
+    }
+    if (colorMode == 5) {
+        return samplePalette6(x,
+            vec3f(0.1900, 0.0718, 0.2322),
+            vec3f(0.2511, 0.2524, 0.6337),
+            vec3f(0.2763, 0.4774, 0.9308),
+            vec3f(0.1637, 0.7170, 0.8030),
+            vec3f(0.7560, 0.8940, 0.2260),
+            vec3f(0.9840, 0.4920, 0.1280));
+    }
+    if (colorMode == 6) {
+        return vec3f(x, x, x);
+    }
+    if (colorMode == 8) {
+        return vec3f(0.2 + 0.8 * x, 1.0 - 0.6 * x, 1.0);
+    }
+
+    return samplePalette6(x,
+        vec3f(0.0, 0.0, 0.0),
+        vec3f(0.5, 0.0, 0.99),
+        vec3f(0.8, 0.0, 0.0),
+        vec3f(1.0, 0.5, 0.0),
+        vec3f(1.0, 1.0, 0.0),
+        vec3f(1.0, 1.0, 1.0));
 }
 
 @vertex

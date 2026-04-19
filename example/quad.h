@@ -163,7 +163,7 @@ public:
         ImGui::SliderInt("m", &m, -std::max(1, l), std::max(1, l));
         ImGui::SliderInt("samples", &count, 1000, kMaxParticles);
 
-        ImGui::Combo("colorspace", &colorMode, "Fire\0Gray\0Cyan-Magenta\0");
+        ImGui::Combo("colorspace", &colorMode, "Inferno\0Magma\0Plasma\0Viridis\0Cividis\0Turbo\0Gray\0Fire\0Cyan-Magenta\0");
 
         ImGui::Separator();
         ImGui::Text("Selected octant is removed");
@@ -179,7 +179,7 @@ public:
         quantum_.m = m;
         quantum_.sampleCount = std::clamp(count, 1000, kMaxParticles);
         quantum_.clamp();
-        colorMode_ = std::clamp(colorMode, 0, 2);
+        colorMode_ = std::clamp(colorMode, 0, 8);
         flowSpeed_ = std::max(0.0f, flowSpeed);
         intensityRange_ = std::clamp(intensityRange, 0.01f, 10.0f);
 
