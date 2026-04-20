@@ -29,7 +29,7 @@ set(imgui_src
 	deps/imgui/imgui_widgets.cpp
 	deps/imgui/imgui_demo.cpp
 	deps/imgui/backends/imgui_impl_sdl3.cpp
-	deps/imgui/backends/imgui_impl_wgpu.cpp
+	#deps/imgui/backends/imgui_impl_wgpu.cpp  # TODO: Fix WebGPU API compatibility
 )
 
 add_executable( App ${src} ${srcc} ${imgui_src} example/main.cpp )

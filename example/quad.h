@@ -406,7 +406,7 @@ private:
         vbo_->setTopology(PrimitiveTopology::PointList);
         vbo_->setAttribute(0, wgfx::vec3f, 0);
 
-        ibo_.reset(wgfx::createIndexBuffer(indices));
+        ibo_.reset(wgfx::createIndexBuffer(std::vector<uint32_t>(indices)));
         pipeline->setVertexBuffer(vbo_.get());
         pipeline->setIndexBuffer(ibo_.get());
     }
