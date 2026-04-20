@@ -139,7 +139,6 @@ fn sampleRFromCDF(u: f32, n: i32, l: i32) -> f32 {
     let nF = max(f32(n), 1.0);
     let lF = max(f32(l), 0.0);
     let expectedR = max(0.5 * (3.0 * nF * nF - lF * (lF + 1.0)), 0.0);
-    // Keep radial domain continuous across l to avoid visible step changes.
     let rMax = 12.0 * nF * nF;
     let dr = rMax / f32(RADIAL_BINS - 1);
     var cdf: array<f32, 384>;
@@ -156,7 +155,6 @@ fn sampleRFromCDF(u: f32, n: i32, l: i32) -> f32 {
     }
 
     if (pdfMax <= 1e-20) {
-        // Degenerate numeric case: fall back to smooth physics-based expected radius.
         return clamp(expectedR, 0.0, rMax);
     }
 
@@ -301,17 +299,14 @@ fn intensityAt(pos: vec3f, n: i32, l: i32, m: i32, intensityScale: f32, intensit
     let x = cos(theta);
     let mAbs = abs(m);
     let plm = associatedLegendre(l, mAbs, x);
-    // Use normalized spherical-harmonic magnitude so brightness is consistent across m.
     let angNum = factorialInt(max(l - mAbs, 0));
     let angDen = max(factorialInt(max(l + mAbs, 0)), 1e-8);
     let yNorm = (f32(2 * l + 1) / (4.0 * 3.14159265358979323846)) * (angNum / angDen);
     let angular = yNorm * plm * plm;
 
     let raw = radialP * angular;
-    // Keep brightness roughly consistent as n grows without washing out to white.
     let nNorm = pow(max(f32(n), 1.0), 3.0);
     let scaled = raw * max(intensityScale, 0.0001) * 30.0 * nNorm;
-    // intensityRange controls highlight compression; lower values are brighter, higher values preserve contrast.
     return clamp(scaled / (scaled + max(intensityRange, 0.0001)), 0.0, 1.0);
 }
 
@@ -341,8 +336,6 @@ fn hsvToRgb(h: f32, s: f32, v: f32) -> vec3f {
 
 fn mapColor(t: f32, colorMode: i32, samplePos: vec3f, simulationTime: f32, n: i32, m: i32, localOmega: f32) -> vec3f {
     let x = clamp(t, 0.0, 1.0);
-    // 0: Inferno, 1: Magma, 2: Plasma, 3: Viridis, 4: Cividis,
-    // 5: Turbo, 6: Gray, 7: Fire, 8: Cyan-Magenta, 9: Phase Velocity, 10: Stationary Phase.
     if (colorMode == 0) {
         return samplePalette6(x,
             vec3f(0.0015, 0.0005, 0.0139),
@@ -428,9 +421,30 @@ fn mapColor(t: f32, colorMode: i32, samplePos: vec3f, simulationTime: f32, n: i3
 fn vs_main(input: VertexInput) -> VertexOutput {
     var output : VertexOutput;
 
-    let n = i32(round(orbital.quantum.x));
-    let l = i32(round(orbital.quantum.y));
-    let m = i32(round(orbital.quantum.z));
+    let directMode = orbital.quantum.x < 0.0;
+
+    if (directMode) {
+        let samplePos = input.position;
+        let colorMode = i32(round(orbital.quantum.w));
+        let removedOctant = i32(round(orbital.render.x));
+        let simulationTime = orbital.render.z;
+
+        let hidden = inRemovedOctant(samplePos, orbital.clipOrigin.xyz, removedOctant);
+        let r = length(samplePos);
+        let t = clamp(exp(-0.06 * r * r), 0.0, 1.0);
+        let omega = 0.5 / max(r, 0.1);
+
+        output.position = orbital.viewProj * vec4f(samplePos, 1.0);
+        output.color = mapColor(t, colorMode, samplePos, simulationTime, 1, 0, omega);
+        output.visible = select(1.0, 0.0, hidden);
+        return output;
+    }
+
+    let n = max(1, i32(round(input.position.x)));
+    let lRaw = i32(round(input.position.y));
+    let l = clamp(lRaw, 0, n - 1);
+    let mRaw = i32(round(input.position.z));
+    let m = clamp(mRaw, -l, l);
     let colorMode = i32(round(orbital.quantum.w));
 
     let removedOctant = i32(round(orbital.render.x));

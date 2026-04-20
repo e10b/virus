@@ -1,10 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <memory>
 #include <random>
+#include <sstream>
+#include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -13,6 +17,7 @@
 
 #include "context.h"
 #include "imgui.h"
+#include "slater_vmc.h"
 #include "wgfx.h"
 
 struct QuantumState {
@@ -109,6 +114,22 @@ public:
         processShortcuts();
         advanceSimulation(dt);
 
+        const bool vmcActive = vmcMode_ && vmcConfigured_;
+
+        if (vmcActive) {
+            vmc_.setWalkerCount(vmcWalkerCount_);
+            vmc_.setParameters(vmcStepSize_, vmcZetaScale_, vmcJastrowBeta_);
+            vmc_.setMaxCloudPoints(static_cast<size_t>(quantum_.sampleCount));
+            vmc_.step(vmcSweepsPerFrame_, vmcThermalizationSweeps_, vmcMeasureEvery_);
+            rebuildVmcPointBuffer();
+            updateCameraForVmc();
+        } else {
+            if (orbitalBufferDirty_) {
+                rebuildOrbitalAttributeBuffer();
+                orbitalBufferDirty_ = false;
+            }
+        }
+
         ImGuiIO& io = ImGui::GetIO();
         float wheel = Context::Instance().consumeWheelDelta();
         camera_.process(dt, !io.WantCaptureMouse, wheel);
@@ -123,7 +144,7 @@ public:
 
         gpuState_.clipOrigin = glm::vec4(clip_.origin, intensityRange_);
         gpuState_.quantum = glm::vec4(
-            static_cast<float>(quantum_.n),
+            vmcActive ? -1.0f : static_cast<float>(quantum_.n),
             static_cast<float>(quantum_.l),
             static_cast<float>(quantum_.m),
             static_cast<float>(colorMode_)
@@ -137,7 +158,11 @@ public:
 
         pipeline->updateUniform(stateUniform_, reinterpret_cast<const float*>(&gpuState_));
 
-        ibo_->indexCount = static_cast<uint32_t>(quantum_.sampleCount);
+        if (vmcActive) {
+            ibo_->indexCount = static_cast<uint32_t>(std::clamp(vmcDrawCount_, 1, kMaxParticles));
+        } else {
+            ibo_->indexCount = static_cast<uint32_t>(quantum_.sampleCount);
+        }
         pipeline->setVertexBuffer(vbo_.get());
         pipeline->setIndexBuffer(ibo_.get());
     }
@@ -145,6 +170,67 @@ public:
     void drawImGuiPanel() {
         ImGui::Begin("Orbital Controls");
         ImGui::Text("GPU orbital evaluation (instant n/l/m updates)");
+
+        bool applyConfigFromEnter = ImGui::InputText(
+            "electron config",
+            configInput_,
+            sizeof(configInput_),
+            ImGuiInputTextFlags_EnterReturnsTrue
+        );
+        ImGui::SameLine();
+        if (ImGui::Button("Apply config") || applyConfigFromEnter) {
+            applyElectronConfiguration(configInput_);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Single orbital mode")) {
+            vmcMode_ = false;
+            useConfiguration_ = false;
+            configMessage_ = "Single-orbital mode active";
+            configError_.clear();
+            orbitalBufferDirty_ = true;
+        }
+
+        ImGui::TextWrapped("Examples: 1s^1 (Hydrogen), 1s^2 2s^2 2p^2 (Carbon)");
+        if (!configMessage_.empty()) {
+            ImGui::TextWrapped("%s", configMessage_.c_str());
+        }
+        if (!configError_.empty()) {
+            ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "%s", configError_.c_str());
+        }
+        ImGui::Separator();
+
+        ImGui::Checkbox("Many-body Slater VMC mode", &vmcMode_);
+        if (vmcMode_ && !vmcConfigured_) {
+            ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.25f, 1.0f), "VMC is enabled but not configured. Click Apply config first.");
+        }
+        ImGui::SliderInt("VMC sweeps/frame", &vmcSweepsPerFrame_, 1, 48);
+        ImGui::SliderInt("VMC thermalization", &vmcThermalizationSweeps_, 0, 16);
+        ImGui::SliderInt("VMC measure every", &vmcMeasureEvery_, 1, 8);
+        ImGui::SliderInt("VMC walkers", &vmcWalkerCount_, 1, 512);
+        ImGui::SliderFloat("VMC step size", &vmcStepSize_, 0.03f, 1.5f, "%.3f");
+        ImGui::SliderFloat("VMC zeta scale", &vmcZetaScale_, 0.2f, 3.0f, "%.3f");
+        ImGui::SliderFloat("Jastrow beta", &vmcJastrowBeta_, 0.0f, 1.5f, "%.3f");
+        ImGui::Checkbox("VMC camera auto-center", &vmcAutoCenterCamera_);
+        ImGui::SameLine();
+        if (ImGui::Button("Center camera now")) {
+            centerCameraOnVmcCloud(true);
+        }
+        if (ImGui::Button("Reset walkers")) {
+            vmc_.resetWalkers(static_cast<uint32_t>(sampleSeed_ * 7919.0f) ^ 0xa341316cu);
+            vmc_.clearPointCloud();
+            sampleSeed_ += 1.0f;
+            centerCameraOnVmcCloud(true);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear VMC cloud")) {
+            vmc_.clearPointCloud();
+            vmcDrawCount_ = 0;
+        }
+        const SlaterVMC::Stats vmcStats = vmc_.stats();
+        ImGui::Text("VMC active walkers: %d", vmc_.walkerCount());
+        ImGui::Text("VMC acceptance: %.2f%%", vmcStats.acceptance * 100.0);
+        ImGui::Text("VMC <E_L>: %.6f Ha (%d measurements)", vmcStats.avgEnergy, vmcStats.measurements);
+        ImGui::Separator();
 
         int n = quantum_.n;
         int l = quantum_.l;
@@ -161,7 +247,6 @@ public:
 
         constexpr int kMaxN = 30;
         ImGui::SliderInt("n", &n, 1, kMaxN);
-        // Let l be adjusted independently; n is auto-raised below so l<n remains valid.
         ImGui::SliderInt("l", &l, 0, kMaxN - 1);
         if (l >= n) {
             n = std::min(kMaxN, l + 1);
@@ -197,9 +282,15 @@ public:
         colorMode_ = std::clamp(colorMode, 0, 10);
         flowSpeed_ = std::max(0.0f, flowSpeed);
         intensityRange_ = std::clamp(intensityRange, 0.01f, 50.0f);
+        vmc_.setMaxCloudPoints(static_cast<size_t>(quantum_.sampleCount));
+
+        if (!useConfiguration_) {
+            orbitalBufferDirty_ = true;
+        }
 
         if (oldN != quantum_.n || oldL != quantum_.l || oldM != quantum_.m) {
             sampleSeed_ += 1.0f;
+            orbitalBufferDirty_ = true;
         }
 
         clip_.origin = glm::vec3(origin[0], origin[1], origin[2]);
@@ -207,6 +298,7 @@ public:
 
         if (ImGui::Button("Reshuffle sample set")) {
             sampleSeed_ += 1.0f;
+            orbitalBufferDirty_ = true;
         }
         ImGui::SameLine();
         if (ImGui::Button("Reset motion phase")) {
@@ -252,6 +344,28 @@ private:
     float simulationTime_ = 0.0f;
     float flowSpeed_ = 8.0f;
 
+    bool useConfiguration_ = false;
+    bool orbitalBufferDirty_ = true;
+    std::vector<SpinOrbitalState> electronOrbitals_;
+    std::vector<float> orbitalAttribData_;
+    std::vector<float> vmcUploadData_;
+    char configInput_[256] = "1s^1";
+    std::string configMessage_;
+    std::string configError_;
+
+    SlaterVMC vmc_;
+    bool vmcMode_ = true;
+    bool vmcConfigured_ = false;
+    int vmcSweepsPerFrame_ = 12;
+    int vmcThermalizationSweeps_ = 2;
+    int vmcMeasureEvery_ = 2;
+    int vmcWalkerCount_ = 64;
+    float vmcStepSize_ = 0.35f;
+    float vmcZetaScale_ = 1.0f;
+    float vmcJastrowBeta_ = 0.2f;
+    int vmcDrawCount_ = 0;
+    bool vmcAutoCenterCamera_ = true;
+
     GpuOrbitalState gpuState_{};
 
     bool prevW_ = false;
@@ -280,14 +394,15 @@ private:
     void operator=(const Quad&) = delete;
 
     void initBuffers() {
-        std::vector<float> points(static_cast<size_t>(kMaxParticles) * 3, 0.0f);
+        orbitalAttribData_.assign(static_cast<size_t>(kMaxParticles) * 3, 0.0f);
+        fillSingleOrbitalAttribData();
 
         std::vector<uint32_t> indices(static_cast<size_t>(kMaxParticles));
         for (uint32_t i = 0; i < static_cast<uint32_t>(kMaxParticles); ++i) {
             indices[i] = i;
         }
 
-        vbo_.reset(wgfx::createVertexBuffer(points));
+        vbo_.reset(wgfx::createVertexBuffer(orbitalAttribData_));
         vbo_->setTopology(PrimitiveTopology::PointList);
         vbo_->setAttribute(0, wgfx::vec3f, 0);
 
@@ -296,9 +411,271 @@ private:
         pipeline->setIndexBuffer(ibo_.get());
     }
 
+    static int orbitalLetterToL(char c) {
+        static const std::string letters = "spdfghiklmnoqrtuvwxyz";
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        const size_t pos = letters.find(c);
+        if (pos == std::string::npos) {
+            return -1;
+        }
+        return static_cast<int>(pos);
+    }
+
+    static const char* elementNameFromZ(int z) {
+        static constexpr std::array<const char*, 31> kNames = {
+            "Unknown",
+            "Hydrogen", "Helium", "Lithium", "Beryllium", "Boron",
+            "Carbon", "Nitrogen", "Oxygen", "Fluorine", "Neon",
+            "Sodium", "Magnesium", "Aluminum", "Silicon", "Phosphorus",
+            "Sulfur", "Chlorine", "Argon", "Potassium", "Calcium",
+            "Scandium", "Titanium", "Vanadium", "Chromium", "Manganese",
+            "Iron", "Cobalt", "Nickel", "Copper", "Zinc"
+        };
+        if (z >= 1 && z < static_cast<int>(kNames.size())) {
+            return kNames[static_cast<size_t>(z)];
+        }
+        return "Custom atom";
+    }
+
+    bool parseElectronConfiguration(const std::string& config, std::vector<SpinOrbitalState>& outStates, std::string& err) const {
+        outStates.clear();
+        err.clear();
+
+        std::stringstream ss(config);
+        std::string token;
+        while (ss >> token) {
+            size_t i = 0;
+            while (i < token.size() && std::isdigit(static_cast<unsigned char>(token[i])) != 0) {
+                ++i;
+            }
+            if (i == 0 || i >= token.size()) {
+                err = "Invalid token: '" + token + "'";
+                return false;
+            }
+
+            int n = std::stoi(token.substr(0, i));
+            int l = orbitalLetterToL(token[i]);
+            if (l < 0) {
+                err = "Unknown orbital letter in token: '" + token + "'";
+                return false;
+            }
+            ++i;
+
+            if (n < 1 || n > 30) {
+                err = "n must be in [1, 30] in token: '" + token + "'";
+                return false;
+            }
+            if (l >= n) {
+                err = "Need l < n in token: '" + token + "'";
+                return false;
+            }
+            if (l > 13) {
+                err = "l > 13 is not supported in this renderer yet";
+                return false;
+            }
+
+            if (i < token.size() && token[i] == '^') {
+                ++i;
+            }
+
+            int occupancy = 1;
+            if (i < token.size()) {
+                const std::string occText = token.substr(i);
+                if (occText.empty() ||
+                    std::all_of(occText.begin(), occText.end(), [](char ch) {
+                        return std::isdigit(static_cast<unsigned char>(ch)) != 0;
+                    }) == false) {
+                    err = "Invalid occupancy in token: '" + token + "'";
+                    return false;
+                }
+                occupancy = std::stoi(occText);
+            }
+
+            const int capacity = 2 * (2 * l + 1);
+            if (occupancy < 1 || occupancy > capacity) {
+                err = "Occupancy exceeds shell capacity in token: '" + token + "'";
+                return false;
+            }
+
+            int assigned = 0;
+            for (int m = -l; m <= l && assigned < occupancy; ++m) {
+                outStates.push_back({ n, l, m, +1 });
+                ++assigned;
+            }
+            for (int m = -l; m <= l && assigned < occupancy; ++m) {
+                outStates.push_back({ n, l, m, -1 });
+                ++assigned;
+            }
+        }
+
+        if (outStates.empty()) {
+            err = "Configuration is empty";
+            return false;
+        }
+        return true;
+    }
+
+    void fillSingleOrbitalAttribData() {
+        for (int i = 0; i < kMaxParticles; ++i) {
+            const size_t base = static_cast<size_t>(i) * 3;
+            orbitalAttribData_[base + 0] = static_cast<float>(quantum_.n);
+            orbitalAttribData_[base + 1] = static_cast<float>(quantum_.l);
+            orbitalAttribData_[base + 2] = static_cast<float>(quantum_.m);
+        }
+    }
+
+    void rebuildOrbitalAttributeBuffer() {
+        if (!vbo_) {
+            return;
+        }
+
+        if (!useConfiguration_ || electronOrbitals_.empty()) {
+            fillSingleOrbitalAttribData();
+            vbo_->write(orbitalAttribData_);
+            return;
+        }
+
+        const int sampleCount = std::clamp(quantum_.sampleCount, 1000, kMaxParticles);
+        std::vector<int> map(static_cast<size_t>(sampleCount));
+        for (int i = 0; i < sampleCount; ++i) {
+            map[static_cast<size_t>(i)] = i % static_cast<int>(electronOrbitals_.size());
+        }
+
+        std::mt19937 rng(static_cast<uint32_t>(sampleSeed_ * 997.0f) ^ 0x9e3779b9u);
+        std::shuffle(map.begin(), map.end(), rng);
+
+        for (int i = 0; i < kMaxParticles; ++i) {
+            int orbitalIndex = 0;
+            if (i < sampleCount) {
+                orbitalIndex = map[static_cast<size_t>(i)];
+            }
+            const SpinOrbitalState& st = electronOrbitals_[static_cast<size_t>(orbitalIndex)];
+            const size_t base = static_cast<size_t>(i) * 3;
+            orbitalAttribData_[base + 0] = static_cast<float>(st.n);
+            orbitalAttribData_[base + 1] = static_cast<float>(st.l);
+            orbitalAttribData_[base + 2] = static_cast<float>(st.m);
+        }
+
+        vbo_->write(orbitalAttribData_);
+    }
+
+    void rebuildVmcPointBuffer() {
+        if (!vbo_) {
+            return;
+        }
+
+        const std::vector<glm::vec3>& cloud = vmc_.pointCloud();
+        const std::vector<glm::vec3>& source = cloud.empty() ? vmc_.positions() : cloud;
+        vmcDrawCount_ = std::min<int>(static_cast<int>(source.size()), kMaxParticles);
+
+        if (vmcDrawCount_ <= 0) {
+            vmcUploadData_.assign({ 0.0f, 0.0f, 0.0f });
+            vmcDrawCount_ = 1;
+            vbo_->write(vmcUploadData_);
+            return;
+        }
+
+        vmcUploadData_.resize(static_cast<size_t>(vmcDrawCount_) * 3);
+        for (int i = 0; i < vmcDrawCount_; ++i) {
+            const glm::vec3& p = source[static_cast<size_t>(i)];
+            const size_t base = static_cast<size_t>(i) * 3;
+            vmcUploadData_[base + 0] = p.x;
+            vmcUploadData_[base + 1] = p.y;
+            vmcUploadData_[base + 2] = p.z;
+        }
+
+        vbo_->write(vmcUploadData_);
+    }
+
+    void centerCameraOnVmcCloud(bool immediate) {
+        const std::vector<glm::vec3>& cloud = vmc_.pointCloud();
+        const std::vector<glm::vec3>& source = cloud.empty() ? vmc_.positions() : cloud;
+        if (source.empty()) {
+            return;
+        }
+
+        const size_t maxSamples = std::min<size_t>(source.size(), 4000);
+        const size_t stride = std::max<size_t>(1, source.size() / maxSamples);
+
+        glm::vec3 centroid(0.0f);
+        size_t count = 0;
+        for (size_t i = 0; i < source.size(); i += stride) {
+            centroid += source[i];
+            ++count;
+            if (count >= maxSamples) {
+                break;
+            }
+        }
+        if (count == 0) {
+            return;
+        }
+        centroid /= static_cast<float>(count);
+
+        float maxDist = 0.0f;
+        for (size_t i = 0; i < source.size(); i += stride) {
+            maxDist = std::max(maxDist, glm::length(source[i] - centroid));
+        }
+
+        const float desiredRadius = std::clamp(maxDist * 4.0f + 8.0f, 8.0f, 320.0f);
+        const float blend = immediate ? 1.0f : 0.08f;
+        camera_.target = glm::mix(camera_.target, centroid, blend);
+        camera_.radius = glm::mix(camera_.radius, desiredRadius, blend);
+    }
+
+    void updateCameraForVmc() {
+        if (!vmcAutoCenterCamera_) {
+            return;
+        }
+        centerCameraOnVmcCloud(false);
+    }
+
+    void applyElectronConfiguration(const std::string& text) {
+        std::vector<SpinOrbitalState> parsed;
+        std::string parseError;
+        if (!parseElectronConfiguration(text, parsed, parseError)) {
+            configError_ = parseError;
+            configMessage_.clear();
+            return;
+        }
+
+        electronOrbitals_ = std::move(parsed);
+        useConfiguration_ = true;
+        configError_.clear();
+
+        const int z = static_cast<int>(electronOrbitals_.size());
+        configMessage_ = "Loaded " + std::to_string(z) + " electron(s): " + elementNameFromZ(z);
+
+        vmc_.setNucleusCharge(z);
+        vmc_.setWalkerCount(vmcWalkerCount_);
+        vmc_.setParameters(vmcStepSize_, vmcZetaScale_, vmcJastrowBeta_);
+        std::string vmcErr;
+        if (!vmc_.configure(electronOrbitals_, vmcErr)) {
+            configError_ = "VMC setup failed: " + vmcErr;
+            vmcConfigured_ = false;
+            return;
+        }
+        vmcConfigured_ = true;
+        vmcMode_ = true;
+        vmc_.setMaxCloudPoints(static_cast<size_t>(quantum_.sampleCount));
+        vmc_.resetWalkers(static_cast<uint32_t>(sampleSeed_ * 7919.0f) ^ 0x9e3779b9u);
+        centerCameraOnVmcCloud(true);
+
+        quantum_.n = electronOrbitals_.front().n;
+        quantum_.l = electronOrbitals_.front().l;
+        quantum_.m = electronOrbitals_.front().m;
+        quantum_.clamp();
+
+        sampleSeed_ += 1.0f;
+        orbitalBufferDirty_ = true;
+    }
+
     void processShortcuts() {
         ImGuiIO& io = ImGui::GetIO();
         if (io.WantCaptureKeyboard) {
+            return;
+        }
+
+        if (vmcMode_) {
             return;
         }
 
