@@ -29,10 +29,11 @@ set(imgui_src
 	deps/imgui/imgui_widgets.cpp
 	deps/imgui/imgui_demo.cpp
 	deps/imgui/backends/imgui_impl_sdl3.cpp
-	#deps/imgui/backends/imgui_impl_wgpu.cpp  # TODO: Fix WebGPU API compatibility
+	deps/imgui/backends/imgui_impl_wgpu.cpp
 )
 
 add_executable( App ${src} ${srcc} ${imgui_src} example/main.cpp )
+set_source_files_properties(deps/imgui/backends/imgui_impl_wgpu.cpp PROPERTIES COMPILE_FLAGS "-x objective-c++")
  #"sdl2webgpu/sdl2webgpu.c" "sdl2webgpu/sdl2webgpu.h")
 
  if(DEV_MODE)

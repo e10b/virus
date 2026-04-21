@@ -2,7 +2,7 @@
 #include <wgfx.h>
 #include "imgui.h"
 #include "imgui_impl_sdl3.h"
-//#include "imgui_impl_wgpu.h"  // TODO: Fix WebGPU API compatibility
+#include "imgui_impl_wgpu.h"
 #include "context.h"
 #include "clock.h"
 #include "quad.h"
@@ -17,20 +17,12 @@ int main()
 	ImGui::CreateContext();
 	ImGui::StyleColorsDark();
 	ImGui_ImplSDL3_InitForOther(context.window);
-	// TODO: Re-enable ImGui WebGPU backend after fixing API compatibility
-	// ImGui_ImplWGPU_InitInfo init_info = {};
-	// init_info.Device = (WGPUDevice)wgfx::device;
-	// init_info.NumFramesInFlight = 2;
-	// init_info.RenderTargetFormat = (WGPUTextureFormat)wgfx::surfaceFormat;
-	// init_info.DepthStencilFormat = WGPUTextureFormat_Undefined;
-	// ImGui_ImplWGPU_Init(&init_info);
-	
-	// Manually build font atlas since WebGPU backend is disabled
-	ImGuiIO& io = ImGui::GetIO();
-	unsigned char* pixels = nullptr;
-	int width = 0, height = 0;
-	io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-	io.Fonts->TexIsBuilt = true;
+	ImGui_ImplWGPU_InitInfo init_info = {};
+	init_info.Device = (WGPUDevice)wgfx::device;
+	init_info.NumFramesInFlight = 2;
+	init_info.RenderTargetFormat = (WGPUTextureFormat)wgfx::surfaceFormat;
+	init_info.DepthStencilFormat = WGPUTextureFormat_Undefined;
+	ImGui_ImplWGPU_Init(&init_info);
 
 	wgfx::ColorTexture* color = new wgfx::ColorTexture();
 	wgfx::RenderPass pass;
@@ -64,7 +56,7 @@ int main()
 		}
 
 		context.update();
-		// ImGui_ImplWGPU_NewFrame();  // TODO: Re-enable after fixing API compatibility
+		ImGui_ImplWGPU_NewFrame();
 		ImGui_ImplSDL3_NewFrame();
 		ImGui::NewFrame();
 		quad.drawImGuiPanel();
@@ -79,13 +71,13 @@ int main()
 		pass.end();
 
 		uiPass.prepare();
-		// ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), (WGPURenderPassEncoder)uiPass.renderPass);  // TODO: Re-enable after fixing API
+		ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), (WGPURenderPassEncoder)uiPass.renderPass);
 		uiPass.end();
 
 		context.draw();
 	}
 
-	// ImGui_ImplWGPU_Shutdown();  // TODO: Re-enable after fixing API compatibility
+	ImGui_ImplWGPU_Shutdown();
 	ImGui_ImplSDL3_Shutdown();
 	ImGui::DestroyContext();
 }
