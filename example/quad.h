@@ -111,6 +111,11 @@ public:
     wgfx::Pipeline* pipeline = nullptr;
 
     void render(float dt) {
+        if (renderPath_ == RenderPath::Path2D) {
+            render2d(dt);
+            return;
+        }
+
         processShortcuts();
         advanceSimulation(dt);
 
@@ -169,6 +174,31 @@ public:
 
     void drawImGuiPanel() {
         ImGui::Begin("Orbital Controls");
+        int pathIndex = static_cast<int>(renderPath_);
+        if (ImGui::Combo("path", &pathIndex, "orbital\0"
+                                               "2d\0")) {
+            renderPath_ = static_cast<RenderPath>(std::clamp(pathIndex, 0, 1));
+            if (renderPath_ == RenderPath::Path2D) {
+                pipeline = pipeline2d_;
+                pipeline->setVertexBuffer(vbo2d_.get());
+                pipeline->setIndexBuffer(ibo2d_.get());
+            } else {
+                pipeline = pipelineOrbital_;
+                pipeline->setVertexBuffer(vbo_.get());
+                pipeline->setIndexBuffer(ibo_.get());
+            }
+        }
+
+        if (renderPath_ == RenderPath::Path2D) {
+            ImGui::Text("2D WGSL raytrace path");
+            ImGui::SliderFloat("2d radius", &circleRadius_, 0.05f, 0.95f, "%.3f");
+            ImGui::SliderFloat2("2d center", &circleCenter_.x, -1.0f, 1.0f, "%.3f");
+            ImGui::SliderFloat("2d edge soft", &circleEdgeSoftness_, 0.0005f, 0.1f, "%.4f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("2d pulse speed", &circlePulseSpeed_, 0.0f, 8.0f, "%.2f");
+            ImGui::End();
+            return;
+        }
+
         ImGui::Text("GPU orbital evaluation (instant n/l/m updates)");
 
         bool applyConfigFromEnter = ImGui::InputText(
@@ -320,11 +350,20 @@ public:
     }
 
 private:
+    enum class RenderPath : int {
+        Orbital = 0,
+        Path2D = 1
+    };
+
     struct alignas(16) GpuOrbitalState {
         glm::mat4 viewProj;
         glm::vec4 clipOrigin;
         glm::vec4 quantum;
         glm::vec4 render;
+    };
+    struct alignas(16) Gpu2dState {
+        glm::vec4 circle;  // x,y center, z radius, w edge softness
+        glm::vec4 render;  // x time, y aspect, z pulse speed, w reserved
     };
 
     static constexpr int kMaxParticles = 250000;
@@ -332,6 +371,12 @@ private:
     std::unique_ptr<wgfx::VertexBuffer> vbo_;
     std::unique_ptr<wgfx::IndexBuffer> ibo_;
     wgfx::Uniform* stateUniform_ = nullptr;
+    std::unique_ptr<wgfx::VertexBuffer> vbo2d_;
+    std::unique_ptr<wgfx::IndexBuffer> ibo2d_;
+    wgfx::Uniform* stateUniform2d_ = nullptr;
+    wgfx::Pipeline* pipelineOrbital_ = nullptr;
+    wgfx::Pipeline* pipeline2d_ = nullptr;
+    RenderPath renderPath_ = RenderPath::Orbital;
 
     OrbitCamera camera_;
     QuantumState quantum_;
@@ -367,6 +412,12 @@ private:
     bool vmcAutoCenterCamera_ = true;
 
     GpuOrbitalState gpuState_{};
+    Gpu2dState gpu2dState_{};
+    glm::vec2 circleCenter_ = glm::vec2(0.0f, 0.0f);
+    float circleRadius_ = 0.5f;
+    float circleEdgeSoftness_ = 0.01f;
+    float circlePulseSpeed_ = 1.0f;
+    float twoDTime_ = 0.0f;
 
     bool prevW_ = false;
     bool prevS_ = false;
@@ -378,16 +429,25 @@ private:
     bool prevG_ = false;
 
     Quad() {
-        pipeline = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "atoms_sphere.wgsl").c_str()));
+        pipelineOrbital_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "atoms_sphere.wgsl").c_str()));
+        pipeline = pipelineOrbital_;
 
         stateUniform_ = wgfx::createUniform(0, sizeof(GpuOrbitalState), reinterpret_cast<const float*>(&gpuState_));
-        pipeline->setUniform(stateUniform_);
+        pipelineOrbital_->setUniform(stateUniform_);
 
-        pipeline->targets = 1;
-        pipeline->useDepth = false;
+        pipelineOrbital_->targets = 1;
+        pipelineOrbital_->useDepth = false;
 
         initBuffers();
-        pipeline->init(vbo_.get());
+        pipelineOrbital_->init(vbo_.get());
+
+        pipeline2d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "circle_2d.wgsl").c_str()));
+        stateUniform2d_ = wgfx::createUniform(0, sizeof(Gpu2dState), reinterpret_cast<const float*>(&gpu2dState_));
+        pipeline2d_->setUniform(stateUniform2d_);
+        pipeline2d_->targets = 1;
+        pipeline2d_->useDepth = false;
+        init2dBuffers();
+        pipeline2d_->init(vbo2d_.get());
     }
 
     Quad(const Quad&) = delete;
@@ -407,8 +467,42 @@ private:
         vbo_->setAttribute(0, wgfx::vec3f, 0);
 
         ibo_.reset(wgfx::createIndexBuffer(std::vector<uint32_t>(indices)));
-        pipeline->setVertexBuffer(vbo_.get());
-        pipeline->setIndexBuffer(ibo_.get());
+        pipelineOrbital_->setVertexBuffer(vbo_.get());
+        pipelineOrbital_->setIndexBuffer(ibo_.get());
+    }
+
+    void init2dBuffers() {
+        const std::vector<float> vertices = {
+            -1.0f, -1.0f, 0.0f,
+             1.0f, -1.0f, 0.0f,
+             1.0f,  1.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f
+        };
+        const std::vector<uint32_t> indices = { 0, 1, 2, 0, 2, 3 };
+
+        vbo2d_.reset(wgfx::createVertexBuffer(vertices));
+        vbo2d_->setTopology(PrimitiveTopology::TriangleList);
+        vbo2d_->setAttribute(0, wgfx::vec3f, 0);
+
+        ibo2d_.reset(wgfx::createIndexBuffer(indices));
+        pipeline2d_->setVertexBuffer(vbo2d_.get());
+        pipeline2d_->setIndexBuffer(ibo2d_.get());
+    }
+
+    void render2d(float dt) {
+        twoDTime_ += std::max(dt, 0.0f);
+
+        int width = 1280;
+        int height = 720;
+        SDL_GetWindowSize(Context::Instance().window, &width, &height);
+        float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
+
+        gpu2dState_.circle = glm::vec4(circleCenter_, std::clamp(circleRadius_, 0.01f, 1.5f), std::max(circleEdgeSoftness_, 0.0001f));
+        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(circlePulseSpeed_, 0.0f), 0.0f);
+        pipeline2d_->updateUniform(stateUniform2d_, reinterpret_cast<const float*>(&gpu2dState_));
+        pipeline2d_->setVertexBuffer(vbo2d_.get());
+        pipeline2d_->setIndexBuffer(ibo2d_.get());
+        pipeline = pipeline2d_;
     }
 
     static int orbitalLetterToL(char c) {
