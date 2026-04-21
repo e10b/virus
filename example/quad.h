@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <random>
 #include <sstream>
@@ -190,11 +191,34 @@ public:
         }
 
         if (renderPath_ == RenderPath::Path2D) {
-            ImGui::Text("2D WGSL raytrace path");
-            ImGui::SliderFloat("2d radius", &circleRadius_, 0.05f, 0.95f, "%.3f");
-            ImGui::SliderFloat2("2d center", &circleCenter_.x, -1.0f, 1.0f, "%.3f");
-            ImGui::SliderFloat("2d edge soft", &circleEdgeSoftness_, 0.0005f, 0.1f, "%.4f", ImGuiSliderFlags_Logarithmic);
-            ImGui::SliderFloat("2d pulse speed", &circlePulseSpeed_, 0.0f, 8.0f, "%.2f");
+            ImGui::Text("2D Hydrogen orbital visualizer");
+            int n = quantum_.n;
+            int l = quantum_.l;
+            int m = quantum_.m;
+            int colorMode = colorMode_;
+            constexpr int kMaxN = 30;
+            ImGui::SliderInt("n", &n, 1, kMaxN);
+            ImGui::SliderInt("l", &l, 0, kMaxN - 1);
+            if (l >= n) {
+                n = std::min(kMaxN, l + 1);
+                l = std::min(l, n - 1);
+            }
+            m = std::clamp(m, -l, l);
+            ImGui::SliderInt("m", &m, -std::max(1, l), std::max(1, l));
+            ImGui::Text("Constraint: l < n (n auto-increases when needed)");
+            ImGui::Combo("colorspace", &colorMode, "Inferno\0Magma\0Plasma\0Viridis\0Cividis\0Turbo\0Gray\0Fire\0Cyan-Magenta\0Phase Velocity\0Stationary Phase\0");
+            ImGui::SliderFloat("2d zoom", &twoDZoom_, 1e-6f, 1e6f, "%.6f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("2d thickness", &twoDThickness_, 0.1f, 8.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("2d slice z", &twoDSliceZ_, -8.0f, 8.0f, "%.2f");
+            ImGui::Checkbox("2d integrate depth", &twoDIntegrateDepth_);
+            ImGui::SliderFloat("2d intensity scale", &intensityScale_, 0.1f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("2d intensity range", &intensityRange_, 0.05f, 50.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("2d phase speed", &twoDPhaseSpeed_, 0.0f, 8.0f, "%.2f");
+            quantum_.n = n;
+            quantum_.l = l;
+            quantum_.m = m;
+            quantum_.clamp();
+            colorMode_ = std::clamp(colorMode, 0, 10);
             ImGui::End();
             return;
         }
@@ -362,8 +386,10 @@ private:
         glm::vec4 render;
     };
     struct alignas(16) Gpu2dState {
-        glm::vec4 circle;  // x,y center, z radius, w edge softness
-        glm::vec4 render;  // x time, y aspect, z pulse speed, w reserved
+        glm::vec4 orbital; // x:n, y:l, z:m, w:colorMode
+        glm::vec4 tuning;  // x:intensityScale, y:intensityRange, z:zoom, w:thickness
+        glm::vec4 render;  // x:time, y:aspect, z:phaseSpeed, w:reserved
+        glm::vec4 pan;     // x:panX, y:panY, z:sliceZ, w:integrateDepth(0/1)
     };
 
     static constexpr int kMaxParticles = 250000;
@@ -413,11 +439,15 @@ private:
 
     GpuOrbitalState gpuState_{};
     Gpu2dState gpu2dState_{};
-    glm::vec2 circleCenter_ = glm::vec2(0.0f, 0.0f);
-    float circleRadius_ = 0.5f;
-    float circleEdgeSoftness_ = 0.01f;
-    float circlePulseSpeed_ = 1.0f;
     float twoDTime_ = 0.0f;
+    float twoDZoom_ = 1.0f;
+    float twoDThickness_ = 3.2f;
+    float twoDPhaseSpeed_ = 1.0f;
+    float twoDSliceZ_ = 0.0f;
+    bool twoDIntegrateDepth_ = false;
+    glm::vec2 twoDPan_ = glm::vec2(0.0f);
+    bool twoDDragging_ = false;
+    glm::vec2 twoDLastMouse_ = glm::vec2(0.0f);
 
     bool prevW_ = false;
     bool prevS_ = false;
@@ -496,13 +526,62 @@ private:
         int height = 720;
         SDL_GetWindowSize(Context::Instance().window, &width, &height);
         float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
+        process2dNavigation(width, height, aspect);
 
-        gpu2dState_.circle = glm::vec4(circleCenter_, std::clamp(circleRadius_, 0.01f, 1.5f), std::max(circleEdgeSoftness_, 0.0001f));
-        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(circlePulseSpeed_, 0.0f), 0.0f);
+        gpu2dState_.orbital = glm::vec4(
+            static_cast<float>(quantum_.n),
+            static_cast<float>(quantum_.l),
+            static_cast<float>(quantum_.m),
+            static_cast<float>(colorMode_));
+        gpu2dState_.tuning = glm::vec4(
+            std::max(intensityScale_, 0.001f),
+            std::max(intensityRange_, 0.001f),
+            std::max(twoDZoom_, 1e-6f),
+            std::max(twoDThickness_, 0.01f));
+        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(twoDPhaseSpeed_, 0.0f), 0.0f);
+        gpu2dState_.pan = glm::vec4(twoDPan_.x, twoDPan_.y, twoDSliceZ_, twoDIntegrateDepth_ ? 1.0f : 0.0f);
         pipeline2d_->updateUniform(stateUniform2d_, reinterpret_cast<const float*>(&gpu2dState_));
         pipeline2d_->setVertexBuffer(vbo2d_.get());
         pipeline2d_->setIndexBuffer(ibo2d_.get());
         pipeline = pipeline2d_;
+    }
+
+    void process2dNavigation(int width, int height, float aspect) {
+        ImGuiIO& io = ImGui::GetIO();
+        const bool allowMouseCapture = !io.WantCaptureMouse;
+
+        float wheel = Context::Instance().consumeWheelDelta();
+        if (wheel != 0.0f && allowMouseCapture) {
+            // Exponential wheel zoom avoids sign issues and feels scale-invariant.
+            twoDZoom_ *= std::exp(wheel * 0.12f);
+            twoDZoom_ = std::clamp(twoDZoom_, 1e-6f, 1e6f);
+        }
+
+        float mx = 0.0f;
+        float my = 0.0f;
+        Uint32 mask = SDL_GetMouseState(&mx, &my);
+        const bool draggingNow = allowMouseCapture && ((mask & SDL_BUTTON_LMASK) != 0 || (mask & SDL_BUTTON_MMASK) != 0);
+        if (!draggingNow) {
+            twoDDragging_ = false;
+            return;
+        }
+
+        if (!twoDDragging_) {
+            twoDDragging_ = true;
+            twoDLastMouse_ = glm::vec2(mx, my);
+            return;
+        }
+
+        const glm::vec2 curr(mx, my);
+        const glm::vec2 delta = curr - twoDLastMouse_;
+        twoDLastMouse_ = curr;
+
+        const float safeWidth = std::max(1, width);
+        const float safeHeight = std::max(1, height);
+        const float ndcDx = (2.0f * delta.x) / static_cast<float>(safeWidth);
+        const float ndcDy = (-2.0f * delta.y) / static_cast<float>(safeHeight);
+        twoDPan_.x -= ndcDx / (std::max(twoDZoom_, 0.01f) * std::max(aspect, 0.001f));
+        twoDPan_.y -= ndcDy / std::max(twoDZoom_, 0.01f);
     }
 
     static int orbitalLetterToL(char c) {
