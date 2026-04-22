@@ -196,7 +196,31 @@ public:
             int l = quantum_.l;
             int m = quantum_.m;
             int colorMode = colorMode_;
+            int twoDMode = twoDUseTdse_ ? 1 : 0;
+            int potentialType = static_cast<int>(tdsePotentialType_);
+            int gridSize = tdseGridSize_;
+            const int oldN = quantum_.n;
+            const int oldL = quantum_.l;
+            const int oldM = quantum_.m;
+            const int oldGrid = tdseGridSize_;
+            const Potential2dType oldPotentialType = tdsePotentialType_;
+            const float oldPotentialStrength = tdsePotentialStrength_;
+            const float oldSquareHalfWidth = tdseSquareHalfWidth_;
+            const float oldDomain = tdseDomainHalfExtent_;
+            const float oldBigRadius = tdseCircleRadiusBig_;
+            const float oldSmallRadius = tdseCircleRadiusSmall_;
+            const float oldAnnIn = tdseAnnulusInner_;
+            const float oldAnnOut = tdseAnnulusOuter_;
+            const float oldBarrierHalfWidth = tdseBarrierHalfWidth_;
+            const float oldSlitCenter = tdseSlitCenterOffset_;
+            const float oldSlitHalfH = tdseSlitHalfHeight_;
+            const glm::vec2 oldPacketCenter = tdsePacketCenter_;
+            const glm::vec2 oldPacketMomentum = tdsePacketMomentum_;
+            const bool oldUseAbsorbing = tdseUseAbsorbingBoundary_;
+            const float oldAbsorbWidth = tdseAbsorbWidth_;
+            const float oldAbsorbStrength = tdseAbsorbStrength_;
             constexpr int kMaxN = 30;
+            ImGui::Combo("2d mode", &twoDMode, "Analytic orbital\0TDSE FDTD\0");
             ImGui::SliderInt("n", &n, 1, kMaxN);
             ImGui::SliderInt("l", &l, 0, kMaxN - 1);
             if (l >= n) {
@@ -214,11 +238,75 @@ public:
             ImGui::SliderFloat("2d intensity scale", &intensityScale_, 0.1f, 100.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("2d intensity range", &intensityRange_, 0.05f, 50.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("2d phase speed", &twoDPhaseSpeed_, 0.0f, 8.0f, "%.2f");
+
+            twoDUseTdse_ = (twoDMode == 1);
+            if (twoDUseTdse_) {
+                ImGui::Separator();
+                ImGui::Text("Time-dependent Schrodinger (explicit FDTD)");
+                ImGui::Text("Use WASD to move the packet center");
+                ImGui::Combo("potential", &potentialType, "Square well\0Circle well (big)\0Circle well (small)\0Double slit well\0Big circle small circle (annulus)\0");
+                ImGui::SliderFloat("potential strength", &tdsePotentialStrength_, 0.0f, 16.0f, "%.3f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("square half-width", &tdseSquareHalfWidth_, 0.2f, 10.0f, "%.2f");
+                ImGui::SliderFloat("big circle radius", &tdseCircleRadiusBig_, 0.3f, 20.0f, "%.2f");
+                ImGui::SliderFloat("small circle radius", &tdseCircleRadiusSmall_, 0.2f, 10.0f, "%.2f");
+                ImGui::SliderFloat("annulus inner radius", &tdseAnnulusInner_, 0.2f, 12.0f, "%.2f");
+                ImGui::SliderFloat("annulus outer radius", &tdseAnnulusOuter_, 0.3f, 20.0f, "%.2f");
+                ImGui::SliderFloat("double-slit barrier half-width", &tdseBarrierHalfWidth_, 0.05f, 1.2f, "%.3f");
+                ImGui::SliderFloat("double-slit offset", &tdseSlitCenterOffset_, 0.0f, 6.0f, "%.2f");
+                ImGui::SliderFloat("double-slit half-height", &tdseSlitHalfHeight_, 0.05f, 2.5f, "%.2f");
+                ImGui::SliderFloat("domain half-size", &tdseDomainHalfExtent_, 4.0f, 40.0f, "%.2f");
+                ImGui::SliderInt("fdtd grid", &gridSize, 64, 320);
+                ImGui::SliderInt("substeps/frame", &tdseSubstepsPerFrame_, 1, 32);
+                ImGui::SliderFloat("dt", &tdseDt_, 1e-6f, 2e-3f, "%.6f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat2("packet center", glm::value_ptr(tdsePacketCenter_), -40.0f, 40.0f, "%.2f");
+                ImGui::SliderFloat2("packet momentum", glm::value_ptr(tdsePacketMomentum_), -8.0f, 8.0f, "%.2f");
+                ImGui::SliderFloat("WASD move speed", &tdsePacketMoveSpeed_, 0.5f, 25.0f, "%.2f");
+                ImGui::Checkbox("absorbing boundary", &tdseUseAbsorbingBoundary_);
+                if (tdseUseAbsorbingBoundary_) {
+                    ImGui::SliderFloat("absorb width", &tdseAbsorbWidth_, 0.4f, 16.0f, "%.2f");
+                    ImGui::SliderFloat("absorb strength", &tdseAbsorbStrength_, 0.5f, 40.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+                }
+                ImGui::Checkbox("overlay potential", &tdseOverlayPotential_);
+                if (ImGui::Button("Reset TDSE wavefunction")) {
+                    tdseWaveNeedsReset_ = true;
+                }
+                tdsePotentialType_ = static_cast<Potential2dType>(std::clamp(potentialType, 0, 4));
+                tdseGridSize_ = std::clamp(gridSize, 64, 320);
+                if (tdseGridSize_ != oldGrid) {
+                    resizeTdseBuffers();
+                }
+                if (tdsePotentialType_ != oldPotentialType ||
+                    tdsePotentialStrength_ != oldPotentialStrength ||
+                    tdseSquareHalfWidth_ != oldSquareHalfWidth ||
+                    tdseDomainHalfExtent_ != oldDomain ||
+                    tdseCircleRadiusBig_ != oldBigRadius ||
+                    tdseCircleRadiusSmall_ != oldSmallRadius ||
+                    tdseAnnulusInner_ != oldAnnIn ||
+                    tdseAnnulusOuter_ != oldAnnOut ||
+                    tdseBarrierHalfWidth_ != oldBarrierHalfWidth ||
+                    tdseSlitCenterOffset_ != oldSlitCenter ||
+                    tdseSlitHalfHeight_ != oldSlitHalfH) {
+                    tdsePotentialDirty_ = true;
+                    tdseWaveNeedsReset_ = true;
+                }
+                if (tdsePacketCenter_ != oldPacketCenter || tdsePacketMomentum_ != oldPacketMomentum) {
+                    tdseWaveNeedsReset_ = true;
+                }
+                if (tdseUseAbsorbingBoundary_ != oldUseAbsorbing ||
+                    tdseAbsorbWidth_ != oldAbsorbWidth ||
+                    tdseAbsorbStrength_ != oldAbsorbStrength) {
+                    tdseWaveNeedsReset_ = true;
+                }
+            }
+
             quantum_.n = n;
             quantum_.l = l;
             quantum_.m = m;
             quantum_.clamp();
             colorMode_ = std::clamp(colorMode, 0, 10);
+            if (oldN != quantum_.n || oldL != quantum_.l || oldM != quantum_.m) {
+                tdseWaveNeedsReset_ = true;
+            }
             ImGui::End();
             return;
         }
@@ -374,6 +462,17 @@ public:
     }
 
 private:
+    static constexpr float kPi = 3.14159265358979323846f;
+    static constexpr int kMaxTdseGrid = 320;
+
+    enum class Potential2dType : int {
+        SquareWell = 0,
+        CircleWellBig = 1,
+        CircleWellSmall = 2,
+        DoubleSlitWell = 3,
+        AnnularWell = 4
+    };
+
     enum class RenderPath : int {
         Orbital = 0,
         Path2D = 1
@@ -388,8 +487,9 @@ private:
     struct alignas(16) Gpu2dState {
         glm::vec4 orbital; // x:n, y:l, z:m, w:colorMode
         glm::vec4 tuning;  // x:intensityScale, y:intensityRange, z:zoom, w:thickness
-        glm::vec4 render;  // x:time, y:aspect, z:phaseSpeed, w:reserved
+        glm::vec4 render;  // x:time, y:aspect, z:phaseSpeed, w:mode(0:analytic,1:tdse)
         glm::vec4 pan;     // x:panX, y:panY, z:sliceZ, w:integrateDepth(0/1)
+        glm::vec4 tdse;    // x:gridSize, y:domainHalfExtent, z:potentialOverlay, w:reserved
     };
 
     static constexpr int kMaxParticles = 250000;
@@ -400,6 +500,7 @@ private:
     std::unique_ptr<wgfx::VertexBuffer> vbo2d_;
     std::unique_ptr<wgfx::IndexBuffer> ibo2d_;
     wgfx::Uniform* stateUniform2d_ = nullptr;
+    wgfx::Uniform* tdseStorage_ = nullptr;
     wgfx::Pipeline* pipelineOrbital_ = nullptr;
     wgfx::Pipeline* pipeline2d_ = nullptr;
     RenderPath renderPath_ = RenderPath::Orbital;
@@ -449,6 +550,39 @@ private:
     bool twoDDragging_ = false;
     glm::vec2 twoDLastMouse_ = glm::vec2(0.0f);
 
+    bool twoDUseTdse_ = false;
+    int tdseGridSize_ = 192;
+    float tdseDomainHalfExtent_ = 22.0f;
+    float tdseDt_ = 0.00018f;
+    int tdseSubstepsPerFrame_ = 8;
+    Potential2dType tdsePotentialType_ = Potential2dType::SquareWell;
+    float tdsePotentialStrength_ = 4.0f;
+    float tdseSquareHalfWidth_ = 3.2f;
+    float tdseCircleRadiusBig_ = 6.0f;
+    float tdseCircleRadiusSmall_ = 2.6f;
+    float tdseAnnulusInner_ = 2.4f;
+    float tdseAnnulusOuter_ = 6.8f;
+    float tdseBarrierHalfWidth_ = 0.32f;
+    float tdseSlitCenterOffset_ = 1.7f;
+    float tdseSlitHalfHeight_ = 0.55f;
+    glm::vec2 tdsePacketCenter_ = glm::vec2(-4.8f, 0.0f);
+    glm::vec2 tdsePacketMomentum_ = glm::vec2(3.2f, 0.0f);
+    float tdsePacketMoveSpeed_ = 8.0f;
+    bool tdseUseAbsorbingBoundary_ = true;
+    float tdseAbsorbWidth_ = 5.0f;
+    float tdseAbsorbStrength_ = 14.0f;
+    bool tdseOverlayPotential_ = false;
+    bool tdsePotentialDirty_ = true;
+    bool tdseWaveNeedsReset_ = true;
+    int tdseNormCounter_ = 0;
+
+    std::vector<float> tdseReal_;
+    std::vector<float> tdseImag_;
+    std::vector<float> tdseNextReal_;
+    std::vector<float> tdseNextImag_;
+    std::vector<float> tdsePotential_;
+    std::vector<float> tdseUpload_;
+
     bool prevW_ = false;
     bool prevS_ = false;
     bool prevE_ = false;
@@ -474,6 +608,13 @@ private:
         pipeline2d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "circle_2d.wgsl").c_str()));
         stateUniform2d_ = wgfx::createUniform(0, sizeof(Gpu2dState), reinterpret_cast<const float*>(&gpu2dState_));
         pipeline2d_->setUniform(stateUniform2d_);
+        resizeTdseBuffers();
+        tdseStorage_ = wgfx::createStorage(
+            1,
+            static_cast<size_t>(kMaxTdseGrid) * static_cast<size_t>(kMaxTdseGrid) * 4 * sizeof(float),
+            nullptr,
+            true);
+        pipeline2d_->uniforms.setStorage(tdseStorage_);
         pipeline2d_->targets = 1;
         pipeline2d_->useDepth = false;
         init2dBuffers();
@@ -519,14 +660,351 @@ private:
         pipeline2d_->setIndexBuffer(ibo2d_.get());
     }
 
+    static float factorialIntCpu(int v) {
+        if (v <= 1) {
+            return 1.0f;
+        }
+        float out = 1.0f;
+        for (int i = 2; i <= v; ++i) {
+            out *= static_cast<float>(i);
+        }
+        return out;
+    }
+
+    static float associatedLaguerreCpu(int k, int alpha, float x) {
+        if (k <= 0) {
+            return 1.0f;
+        }
+        float lm2 = 1.0f;
+        float lm1 = 1.0f + static_cast<float>(alpha) - x;
+        if (k == 1) {
+            return lm1;
+        }
+        float l = lm1;
+        for (int j = 2; j <= k; ++j) {
+            l = ((static_cast<float>(2 * j - 1 + alpha) - x) * lm1 - static_cast<float>(j - 1 + alpha) * lm2) / static_cast<float>(j);
+            lm2 = lm1;
+            lm1 = l;
+        }
+        return l;
+    }
+
+    static float associatedLegendreCpu(int l, int mAbs, float x) {
+        float pmm = 1.0f;
+        if (mAbs > 0) {
+            const float somx2 = std::sqrt(std::max(0.0f, (1.0f - x) * (1.0f + x)));
+            float fact = 1.0f;
+            for (int j = 1; j <= mAbs; ++j) {
+                pmm = pmm * (-fact) * somx2;
+                fact += 2.0f;
+            }
+        }
+        if (l == mAbs) {
+            return pmm;
+        }
+        float pm1m = x * static_cast<float>(2 * mAbs + 1) * pmm;
+        if (l == mAbs + 1) {
+            return pm1m;
+        }
+        float pll = pm1m;
+        for (int ll = mAbs + 2; ll <= l; ++ll) {
+            pll = ((static_cast<float>(2 * ll - 1) * x * pm1m) - (static_cast<float>(ll + mAbs - 1) * pmm)) / static_cast<float>(ll - mAbs);
+            pmm = pm1m;
+            pm1m = pll;
+        }
+        return pll;
+    }
+
+    float orbitalWavefunctionSliceReal(float x, float y, int n, int l, int m) const {
+        const float r = std::sqrt(x * x + y * y);
+        const float theta = std::acos(std::clamp(0.0f / std::max(r, 1e-6f), -1.0f, 1.0f));
+        const float rho = 2.0f * r / std::max(static_cast<float>(n), 1.0f);
+        const int k = n - l - 1;
+        const int alpha = 2 * l + 1;
+        const float laguerre = associatedLaguerreCpu(std::max(k, 0), alpha, rho);
+        const float nn = std::max(static_cast<float>(n), 1.0f);
+        const float num = factorialIntCpu(std::max(n - l - 1, 0));
+        const float den = std::max(factorialIntCpu(std::max(n + l, 0)), 1e-8f);
+        const float norm = std::pow(2.0f / nn, 3.0f) * num / (2.0f * nn * den);
+        const float radial = std::sqrt(std::max(norm, 0.0f)) * std::exp(-rho * 0.5f) * std::pow(std::max(rho, 1e-6f), static_cast<float>(l)) * laguerre;
+
+        const float xLeg = std::cos(theta);
+        const int mAbs = std::abs(m);
+        const float plm = associatedLegendreCpu(l, mAbs, xLeg);
+        const float angNum = factorialIntCpu(std::max(l - mAbs, 0));
+        const float angDen = std::max(factorialIntCpu(std::max(l + mAbs, 0)), 1e-8f);
+        const float yNorm = (static_cast<float>(2 * l + 1) / (4.0f * kPi)) * (angNum / angDen);
+        const float angularAmp = std::sqrt(std::max(yNorm, 0.0f)) * plm;
+
+        const float phi = std::atan2(y, x);
+        const float phase = static_cast<float>(m) * phi;
+        return radial * angularAmp * std::cos(phase);
+    }
+
+    void resizeTdseBuffers() {
+        tdseGridSize_ = std::clamp(tdseGridSize_, 64, kMaxTdseGrid);
+        const size_t cellCount = static_cast<size_t>(tdseGridSize_) * static_cast<size_t>(tdseGridSize_);
+        tdseReal_.assign(cellCount, 0.0f);
+        tdseImag_.assign(cellCount, 0.0f);
+        tdseNextReal_.assign(cellCount, 0.0f);
+        tdseNextImag_.assign(cellCount, 0.0f);
+        tdsePotential_.assign(cellCount, 0.0f);
+        tdseUpload_.assign(cellCount * 4, 0.0f);
+        tdsePotentialDirty_ = true;
+        tdseWaveNeedsReset_ = true;
+    }
+
+    void rebuildTdsePotential() {
+        if (tdsePotential_.empty()) {
+            return;
+        }
+
+        const int n = tdseGridSize_;
+        const float domain = std::max(tdseDomainHalfExtent_, 1.0f);
+        const float dx = (2.0f * domain) / static_cast<float>(n - 1);
+        const float strength = std::max(tdsePotentialStrength_, 0.0f);
+        const float halfWidth = std::clamp(tdseSquareHalfWidth_, 0.1f, domain * 0.95f);
+        const float radiusBig = std::clamp(tdseCircleRadiusBig_, 0.2f, domain * 0.95f);
+        const float radiusSmall = std::clamp(tdseCircleRadiusSmall_, 0.2f, domain * 0.95f);
+        const float annIn = std::clamp(tdseAnnulusInner_, 0.1f, domain * 0.9f);
+        const float annOut = std::clamp(tdseAnnulusOuter_, annIn + 0.1f, domain * 0.95f);
+        const float barrierHalfWidth = std::clamp(tdseBarrierHalfWidth_, 0.06f, domain * 0.2f);
+        const float slitCenter = std::clamp(tdseSlitCenterOffset_, 0.0f, domain * 0.8f);
+        const float slitHalfH = std::clamp(tdseSlitHalfHeight_, 0.05f, domain * 0.4f);
+
+        for (int iy = 0; iy < n; ++iy) {
+            const float y = -domain + static_cast<float>(iy) * dx;
+            for (int ix = 0; ix < n; ++ix) {
+                const float x = -domain + static_cast<float>(ix) * dx;
+                float v = 0.0f;
+                const float r = std::sqrt(x * x + y * y);
+
+                switch (tdsePotentialType_) {
+                case Potential2dType::SquareWell:
+                    if (std::abs(x) <= halfWidth && std::abs(y) <= halfWidth) {
+                        v = -strength;
+                    }
+                    break;
+                case Potential2dType::CircleWellBig:
+                    if (r <= radiusBig) {
+                        v = -strength;
+                    }
+                    break;
+                case Potential2dType::CircleWellSmall:
+                    if (r <= radiusSmall) {
+                        v = -strength;
+                    }
+                    break;
+                case Potential2dType::DoubleSlitWell: {
+                    const float boxHalf = std::max(halfWidth * 1.8f, 1.0f);
+                    if (std::abs(x) <= boxHalf && std::abs(y) <= boxHalf) {
+                        v = -0.5f * strength;
+                    }
+                    const bool inBarrier = (std::abs(x) <= barrierHalfWidth) && (std::abs(y) <= boxHalf * 0.95f);
+                    const bool inSlitA = std::abs(y - slitCenter) <= slitHalfH;
+                    const bool inSlitB = std::abs(y + slitCenter) <= slitHalfH;
+                    if (inBarrier && !(inSlitA || inSlitB)) {
+                        v = 2.0f * strength;
+                    }
+                    break;
+                }
+                case Potential2dType::AnnularWell: {
+                    if (r >= annIn && r <= annOut) {
+                        v = -strength;
+                    }
+                    break;
+                }
+                }
+
+                tdsePotential_[static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix)] = v;
+            }
+        }
+
+        tdsePotentialDirty_ = false;
+    }
+
+    void resetTdseWavefunction() {
+        if (tdsePotentialDirty_) {
+            rebuildTdsePotential();
+        }
+
+        const int n = tdseGridSize_;
+        const float domain = std::max(tdseDomainHalfExtent_, 1.0f);
+        const float dx = (2.0f * domain) / static_cast<float>(n - 1);
+        const glm::vec2 center(
+            std::clamp(tdsePacketCenter_.x, -domain * 0.95f, domain * 0.95f),
+            std::clamp(tdsePacketCenter_.y, -domain * 0.95f, domain * 0.95f));
+        tdsePacketCenter_ = center;
+        const glm::vec2 momentum = tdsePacketMomentum_;
+        const float sigma = std::max(domain * 0.12f, 0.2f);
+        const float inv2Sigma2 = 1.0f / std::max(2.0f * sigma * sigma, 1e-6f);
+
+        float norm = 0.0f;
+        for (int iy = 0; iy < n; ++iy) {
+            const float y = -domain + static_cast<float>(iy) * dx;
+            for (int ix = 0; ix < n; ++ix) {
+                const float x = -domain + static_cast<float>(ix) * dx;
+                const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                const float dxp = x - center.x;
+                const float dyp = y - center.y;
+                const float env = std::exp(-(dxp * dxp + dyp * dyp) * inv2Sigma2);
+                const float phase = momentum.x * dxp + momentum.y * dyp;
+                tdseReal_[idx] = env * std::cos(phase);
+                tdseImag_[idx] = env * std::sin(phase);
+                norm += (tdseReal_[idx] * tdseReal_[idx] + tdseImag_[idx] * tdseImag_[idx]) * dx * dx;
+            }
+        }
+
+        if (norm > 1e-12f) {
+            const float inv = 1.0f / std::sqrt(norm);
+            for (size_t i = 0; i < tdseReal_.size(); ++i) {
+                tdseReal_[i] *= inv;
+                tdseImag_[i] *= inv;
+            }
+        }
+
+        tdseWaveNeedsReset_ = false;
+        tdseNormCounter_ = 0;
+        twoDTime_ = 0.0f;
+    }
+
+    void stepTdseSimulation() {
+        if (!twoDUseTdse_) {
+            return;
+        }
+        if (tdsePotentialDirty_) {
+            rebuildTdsePotential();
+        }
+        if (tdseWaveNeedsReset_) {
+            resetTdseWavefunction();
+        }
+
+        const int n = tdseGridSize_;
+        if (n < 8 || tdseReal_.size() != static_cast<size_t>(n) * static_cast<size_t>(n)) {
+            return;
+        }
+
+        const float domain = std::max(tdseDomainHalfExtent_, 1.0f);
+        const float dx = (2.0f * domain) / static_cast<float>(n - 1);
+        const float invDx2 = 1.0f / std::max(dx * dx, 1e-8f);
+        const float dt = std::clamp(tdseDt_, 1e-6f, 2e-3f);
+        const int steps = std::clamp(tdseSubstepsPerFrame_, 1, 32);
+        const float absorbWidth = std::clamp(tdseAbsorbWidth_, 0.1f, domain * 0.9f);
+        const float absorbStrength = std::max(tdseAbsorbStrength_, 0.0f);
+
+        for (int step = 0; step < steps; ++step) {
+            for (int iy = 1; iy < n - 1; ++iy) {
+                for (int ix = 1; ix < n - 1; ++ix) {
+                    const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                    const size_t left = idx - 1;
+                    const size_t right = idx + 1;
+                    const size_t down = idx - static_cast<size_t>(n);
+                    const size_t up = idx + static_cast<size_t>(n);
+
+                    const float lapI = (tdseImag_[left] + tdseImag_[right] + tdseImag_[down] + tdseImag_[up] - 4.0f * tdseImag_[idx]) * invDx2;
+                    const float lapR = (tdseReal_[left] + tdseReal_[right] + tdseReal_[down] + tdseReal_[up] - 4.0f * tdseReal_[idx]) * invDx2;
+                    const float v = tdsePotential_[idx];
+
+                    tdseNextReal_[idx] = tdseReal_[idx] + dt * (-0.5f * lapI + v * tdseImag_[idx]);
+                    tdseNextImag_[idx] = tdseImag_[idx] + dt * (0.5f * lapR - v * tdseReal_[idx]);
+                }
+            }
+
+            for (int i = 0; i < n; ++i) {
+                const size_t top = static_cast<size_t>(i);
+                const size_t bottom = static_cast<size_t>(n - 1) * static_cast<size_t>(n) + static_cast<size_t>(i);
+                const size_t left = static_cast<size_t>(i) * static_cast<size_t>(n);
+                const size_t right = left + static_cast<size_t>(n - 1);
+                tdseNextReal_[top] = tdseNextReal_[top + static_cast<size_t>(n)];
+                tdseNextImag_[top] = tdseNextImag_[top + static_cast<size_t>(n)];
+                tdseNextReal_[bottom] = tdseNextReal_[bottom - static_cast<size_t>(n)];
+                tdseNextImag_[bottom] = tdseNextImag_[bottom - static_cast<size_t>(n)];
+                tdseNextReal_[left] = tdseNextReal_[left + 1];
+                tdseNextImag_[left] = tdseNextImag_[left + 1];
+                tdseNextReal_[right] = tdseNextReal_[right - 1];
+                tdseNextImag_[right] = tdseNextImag_[right - 1];
+            }
+
+            if (tdseUseAbsorbingBoundary_) {
+                for (int iy = 0; iy < n; ++iy) {
+                    for (int ix = 0; ix < n; ++ix) {
+                        const float edgeCells = static_cast<float>(std::min(std::min(ix, n - 1 - ix), std::min(iy, n - 1 - iy)));
+                        const float edgeDist = edgeCells * dx;
+                        if (edgeDist < absorbWidth) {
+                            const float s = 1.0f - (edgeDist / absorbWidth);
+                            const float damping = std::exp(-absorbStrength * s * s * dt);
+                            const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                            tdseNextReal_[idx] *= damping;
+                            tdseNextImag_[idx] *= damping;
+                        }
+                    }
+                }
+            }
+
+            tdseReal_.swap(tdseNextReal_);
+            tdseImag_.swap(tdseNextImag_);
+        }
+
+        ++tdseNormCounter_;
+        if (tdseNormCounter_ >= 10) {
+            float norm = 0.0f;
+            for (size_t i = 0; i < tdseReal_.size(); ++i) {
+                norm += (tdseReal_[i] * tdseReal_[i] + tdseImag_[i] * tdseImag_[i]) * dx * dx;
+            }
+            if (norm > 1e-12f) {
+                const float inv = 1.0f / std::sqrt(norm);
+                for (size_t i = 0; i < tdseReal_.size(); ++i) {
+                    tdseReal_[i] *= inv;
+                    tdseImag_[i] *= inv;
+                }
+            }
+            tdseNormCounter_ = 0;
+        }
+    }
+
+    void uploadTdseField() {
+        if (!tdseStorage_ || tdseUpload_.empty() || tdsePotential_.empty()) {
+            return;
+        }
+        float maxAbsPotential = 0.0f;
+        for (float v : tdsePotential_) {
+            maxAbsPotential = std::max(maxAbsPotential, std::abs(v));
+        }
+        const float invMaxAbsPotential = (maxAbsPotential > 1e-6f) ? (1.0f / maxAbsPotential) : 0.0f;
+
+        for (size_t i = 0; i < tdseReal_.size(); ++i) {
+            const float re = tdseReal_[i];
+            const float im = tdseImag_[i];
+            const float rho = re * re + im * im;
+            float phase01 = std::atan2(im, re) / (2.0f * kPi);
+            if (phase01 < 0.0f) {
+                phase01 += 1.0f;
+            }
+            const float pot01 = 0.5f + 0.5f * tdsePotential_[i] * invMaxAbsPotential;
+
+            const size_t base = i * 4;
+            tdseUpload_[base + 0] = rho;
+            tdseUpload_[base + 1] = phase01;
+            tdseUpload_[base + 2] = pot01;
+            tdseUpload_[base + 3] = 1.0f;
+        }
+
+        pipeline2d_->uniforms.updateStorageBuffer(tdseStorage_, tdseUpload_.data(), tdseUpload_.size() * sizeof(float));
+    }
+
     void render2d(float dt) {
         twoDTime_ += std::max(dt, 0.0f);
+
+        if (twoDUseTdse_) {
+            stepTdseSimulation();
+            uploadTdseField();
+        }
 
         int width = 1280;
         int height = 720;
         SDL_GetWindowSize(Context::Instance().window, &width, &height);
         float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
-        process2dNavigation(width, height, aspect);
+        process2dNavigation(width, height, aspect, dt);
 
         gpu2dState_.orbital = glm::vec4(
             static_cast<float>(quantum_.n),
@@ -538,17 +1016,41 @@ private:
             std::max(intensityRange_, 0.001f),
             std::max(twoDZoom_, 1e-6f),
             std::max(twoDThickness_, 0.01f));
-        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(twoDPhaseSpeed_, 0.0f), 0.0f);
+        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(twoDPhaseSpeed_, 0.0f), twoDUseTdse_ ? 1.0f : 0.0f);
         gpu2dState_.pan = glm::vec4(twoDPan_.x, twoDPan_.y, twoDSliceZ_, twoDIntegrateDepth_ ? 1.0f : 0.0f);
+        gpu2dState_.tdse = glm::vec4(
+            static_cast<float>(tdseGridSize_),
+            std::max(tdseDomainHalfExtent_, 1.0f),
+            tdseOverlayPotential_ ? 1.0f : 0.0f,
+            0.0f);
         pipeline2d_->updateUniform(stateUniform2d_, reinterpret_cast<const float*>(&gpu2dState_));
         pipeline2d_->setVertexBuffer(vbo2d_.get());
         pipeline2d_->setIndexBuffer(ibo2d_.get());
         pipeline = pipeline2d_;
     }
 
-    void process2dNavigation(int width, int height, float aspect) {
+    void process2dNavigation(int width, int height, float aspect, float dt) {
         ImGuiIO& io = ImGui::GetIO();
         const bool allowMouseCapture = !io.WantCaptureMouse;
+        const bool allowKeyboardCapture = !io.WantCaptureKeyboard;
+
+        if (twoDUseTdse_ && allowKeyboardCapture) {
+            const Uint8* keys = SDL_GetKeyboardState(nullptr);
+            glm::vec2 move(0.0f);
+            if (keys[SDL_SCANCODE_W]) move.y += 1.0f;
+            if (keys[SDL_SCANCODE_S]) move.y -= 1.0f;
+            if (keys[SDL_SCANCODE_A]) move.x -= 1.0f;
+            if (keys[SDL_SCANCODE_D]) move.x += 1.0f;
+            if (glm::dot(move, move) > 0.0f) {
+                const float len = std::sqrt(move.x * move.x + move.y * move.y);
+                move /= len;
+                tdsePacketCenter_ += move * tdsePacketMoveSpeed_ * std::max(dt, 0.0f);
+                const float domain = std::max(tdseDomainHalfExtent_, 1.0f);
+                tdsePacketCenter_.x = std::clamp(tdsePacketCenter_.x, -0.95f * domain, 0.95f * domain);
+                tdsePacketCenter_.y = std::clamp(tdsePacketCenter_.y, -0.95f * domain, 0.95f * domain);
+                tdseWaveNeedsReset_ = true;
+            }
+        }
 
         float wheel = Context::Instance().consumeWheelDelta();
         if (wheel != 0.0f && allowMouseCapture) {
