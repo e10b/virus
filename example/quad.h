@@ -802,11 +802,7 @@ private:
                     }
                     break;
                 case Potential2dType::DoubleSlitWell: {
-                    const float boxHalf = std::max(halfWidth * 1.8f, 1.0f);
-                    if (std::abs(x) <= boxHalf && std::abs(y) <= boxHalf) {
-                        v = -0.5f * strength;
-                    }
-                    const bool inBarrier = (std::abs(x) <= barrierHalfWidth) && (std::abs(y) <= boxHalf * 0.95f);
+                    const bool inBarrier = (std::abs(x) <= barrierHalfWidth);
                     const bool inSlitA = std::abs(y - slitCenter) <= slitHalfH;
                     const bool inSlitB = std::abs(y + slitCenter) <= slitHalfH;
                     if (inBarrier && !(inSlitA || inSlitB)) {
