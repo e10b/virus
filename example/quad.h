@@ -258,7 +258,7 @@ public:
                 ImGui::SliderInt("fdtd grid", &gridSize, 64, 320);
                 ImGui::Combo("integrator", &tdseIntegrator_, "Euler\0Crank-Nicolson\0");
                 ImGui::SliderInt("substeps/frame", &tdseSubstepsPerFrame_, 1, 32);
-                ImGui::SliderFloat("dt", &tdseDt_, 1e-6f, 2e-3f, "%.6f", ImGuiSliderFlags_Logarithmic);
+                ImGui::SliderFloat("dt", &tdseDt_, 1e-6f, 1.0f, "%.6f", ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat2("packet center", glm::value_ptr(tdsePacketCenter_), -40.0f, 40.0f, "%.2f");
                 ImGui::SliderFloat2("packet momentum", glm::value_ptr(tdsePacketMomentum_), -8.0f, 8.0f, "%.2f");
                 ImGui::SliderFloat("WASD move speed", &tdsePacketMoveSpeed_, 0.5f, 25.0f, "%.2f");
@@ -554,7 +554,7 @@ private:
     bool twoDUseTdse_ = false;
     int tdseGridSize_ = 192;
     float tdseDomainHalfExtent_ = 22.0f;
-    float tdseDt_ = 0.00018f;
+    float tdseDt_ = 0.1f;
     int tdseSubstepsPerFrame_ = 8;
     int tdseIntegrator_ = 1;
     Potential2dType tdsePotentialType_ = Potential2dType::SquareWell;
@@ -891,7 +891,7 @@ void stepTdseSimulation() {
         // Mikaberidze's implementation assumes dx = 1.0 (grid units) for the Laplacian.
         // We set invDx2 = 1.0f here to perfectly match the stability and wave dynamics of the JS version.
         const float invDx2 = 1.0f; // previously: 1.0f / std::max(dx * dx, 1e-8f);
-        const float dt = std::clamp(tdseDt_, 1e-6f, 2e-3f);
+        const float dt = std::clamp(tdseDt_, 1e-6f, 1.0f);
         const int steps = std::clamp(tdseSubstepsPerFrame_, 1, 32);
         const float absorbWidth = std::clamp(tdseAbsorbWidth_, 0.1f, domain * 0.9f);
         const float absorbStrength = std::max(tdseAbsorbStrength_, 0.0f);
@@ -936,7 +936,7 @@ void stepTdseSimulation() {
                 }
 
                 // 2) Fixed-point iteration
-                const int CN_ITERS = 10;
+                const int CN_ITERS = 4;
                 for (int iter = 0; iter < CN_ITERS; ++iter) {
                     for (int iy = 1; iy < n - 1; ++iy) {
                         for (int ix = 1; ix < n - 1; ++ix) {
