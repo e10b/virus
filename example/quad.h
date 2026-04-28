@@ -116,6 +116,10 @@ public:
             render2d(dt);
             return;
         }
+        if (renderPath_ == RenderPath::Path3D) {
+            render3d(dt);
+            return;
+        }
 
         processShortcuts();
         advanceSimulation(dt);
@@ -177,17 +181,123 @@ public:
         ImGui::Begin("Orbital Controls");
         int pathIndex = static_cast<int>(renderPath_);
         if (ImGui::Combo("path", &pathIndex, "orbital\0"
-                                               "2d\0")) {
-            renderPath_ = static_cast<RenderPath>(std::clamp(pathIndex, 0, 1));
+                                               "2d\0"
+                                               "3d TDSE\0")) {
+            renderPath_ = static_cast<RenderPath>(std::clamp(pathIndex, 0, 2));
             if (renderPath_ == RenderPath::Path2D) {
                 pipeline = pipeline2d_;
                 pipeline->setVertexBuffer(vbo2d_.get());
                 pipeline->setIndexBuffer(ibo2d_.get());
+            } else if (renderPath_ == RenderPath::Path3D) {
+                pipeline = pipeline3d_;
+                pipeline->setVertexBuffer(vbo3d_.get());
+                pipeline->setIndexBuffer(ibo3d_.get());
             } else {
                 pipeline = pipelineOrbital_;
                 pipeline->setVertexBuffer(vbo_.get());
                 pipeline->setIndexBuffer(ibo_.get());
             }
+        }
+
+        if (renderPath_ == RenderPath::Path3D) {
+            ImGui::Separator();
+            ImGui::Text("3D TDSE FDTD");
+
+            int gridSize     = tdse3dGridSize_;
+            int substeps     = tdse3dSubsteps_;
+            int integrator   = tdse3dIntegrator_;
+            int potType      = static_cast<int>(tdse3dPotType_);
+            int colorMode    = tdse3dColorMode_;
+            int sliceAxis    = tdse3dSliceAxis_ + 1; // 0->volume, 1->x, 2->y, 3->z
+            int marchSteps   = static_cast<int>(tdse3dMarchSteps_);
+
+            const int oldGrid  = tdse3dGridSize_;
+            const Potential3dType oldPot = tdse3dPotType_;
+            const float oldStrength  = tdse3dPotStrength_;
+            const float oldRadius    = tdse3dPotRadius_;
+            const float oldDomain    = tdse3dDomainHalf_;
+            const glm::vec3 oldPos   = tdse3dPacketPos_;
+            const glm::vec3 oldMom   = tdse3dPacketMom_;
+            const float oldSigma     = tdse3dSigma_;
+            const bool oldAbsorb     = tdse3dUseAbsorbing_;
+            const float oldAbsW      = tdse3dAbsorbWidth_;
+            const float oldAbsS      = tdse3dAbsorbStrength_;
+
+            ImGui::Combo("integrator##3d", &integrator, "Euler\0Crank-Nicolson\0");
+            ImGui::SliderInt("grid N##3d", &gridSize, 8, kMaxTdse3dGrid);
+            ImGui::SliderInt("substeps##3d", &substeps, 1, 16);
+            ImGui::SliderFloat("dt##3d", &tdse3dDt_, 1e-4f, 0.5f, "%.5f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("domain half##3d", &tdse3dDomainHalf_, 4.0f, 30.0f, "%.2f");
+            ImGui::Separator();
+            ImGui::Text("Initial wavepacket");
+            ImGui::SliderFloat3("packet pos##3d",  glm::value_ptr(tdse3dPacketPos_), -10.0f, 10.0f, "%.2f");
+            ImGui::SliderFloat3("packet mom##3d",  glm::value_ptr(tdse3dPacketMom_), -6.0f,  6.0f,  "%.2f");
+            ImGui::SliderFloat("sigma##3d", &tdse3dSigma_, 0.3f, 6.0f, "%.2f");
+            ImGui::Separator();
+            ImGui::Text("Potential");
+            ImGui::Combo("potential##3d", &potType, "Free\0Harmonic well\0Coulomb well\0Spherical barrier\0Double well\0");
+            ImGui::SliderFloat("strength##3d", &tdse3dPotStrength_, 0.0f, 4.0f, "%.3f");
+            ImGui::SliderFloat("radius##3d",   &tdse3dPotRadius_,   0.5f, 12.0f, "%.2f");
+            ImGui::Checkbox("show potential##3d", &tdse3dShowPotential_);
+            ImGui::Separator();
+            ImGui::Text("Absorbing boundary");
+            ImGui::Checkbox("absorbing##3d", &tdse3dUseAbsorbing_);
+            if (tdse3dUseAbsorbing_) {
+                ImGui::SliderFloat("absorb width##3d",    &tdse3dAbsorbWidth_,    0.5f, 10.0f, "%.2f");
+                ImGui::SliderFloat("absorb strength##3d", &tdse3dAbsorbStrength_, 0.5f, 40.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            }
+            ImGui::Separator();
+            ImGui::Text("Visualization");
+            ImGui::Combo("color##3d", &colorMode, "Inferno\0Magma\0Plasma\0Viridis\0\0\0Gray\0\0\0Phase\0");
+            ImGui::Combo("view##3d", &sliceAxis, "Volume (ray-march)\0Slice X\0Slice Y\0Slice Z\0");
+            if (sliceAxis > 0) {
+                ImGui::SliderFloat("slice pos##3d", &tdse3dSlicePos_, -tdse3dDomainHalf_, tdse3dDomainHalf_, "%.2f");
+            } else {
+                ImGui::SliderInt("march steps##3d", &marchSteps, 16, 256);
+                ImGui::SliderFloat("alpha scale##3d", &tdse3dAlphaScale_, 0.001f, 2.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
+            }
+            ImGui::SliderFloat("intensity scale##3d", &tdse3dIntensityScale_, 0.01f, 20.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderFloat("intensity range##3d", &tdse3dIntensityRange_, 0.01f, 4.0f,  "%.4f", ImGuiSliderFlags_Logarithmic);
+
+            if (ImGui::Button("Reset 3D wavefunction")) {
+                tdse3dNeedsReset_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::Text("t = %.3f", tdse3dTime_);
+
+            // Commit
+            tdse3dIntegrator_ = integrator;
+            tdse3dSubsteps_   = substeps;
+            tdse3dColorMode_  = colorMode;
+            tdse3dMarchSteps_ = static_cast<float>(std::clamp(marchSteps, 16, 256));
+            tdse3dSliceAxis_  = sliceAxis - 1;
+            const Potential3dType newPotType = static_cast<Potential3dType>(std::clamp(potType, 0, 4));
+
+            if (gridSize != oldGrid) {
+                tdse3dGridSize_ = gridSize;
+                resize3dBuffers();
+            }
+            if (newPotType != oldPot ||
+                tdse3dPotStrength_ != oldStrength ||
+                tdse3dPotRadius_   != oldRadius   ||
+                tdse3dDomainHalf_  != oldDomain) {
+                tdse3dPotType_   = newPotType;
+                tdse3dPotDirty_  = true;
+                tdse3dNeedsReset_ = true;
+            } else {
+                tdse3dPotType_ = newPotType;
+            }
+            if (tdse3dPacketPos_ != oldPos || tdse3dPacketMom_ != oldMom || tdse3dSigma_ != oldSigma) {
+                tdse3dNeedsReset_ = true;
+            }
+            if (tdse3dUseAbsorbing_ != oldAbsorb ||
+                tdse3dAbsorbWidth_  != oldAbsW   ||
+                tdse3dAbsorbStrength_ != oldAbsS) {
+                tdse3dNeedsReset_ = true;
+            }
+
+            ImGui::End();
+            return;
         }
 
         if (renderPath_ == RenderPath::Path2D) {
@@ -476,7 +586,8 @@ private:
 
     enum class RenderPath : int {
         Orbital = 0,
-        Path2D = 1
+        Path2D = 1,
+        Path3D = 2
     };
 
     struct alignas(16) GpuOrbitalState {
@@ -492,6 +603,13 @@ private:
         glm::vec4 pan;     // x:panX, y:panY, z:sliceZ, w:integrateDepth(0/1)
         glm::vec4 tdse;    // x:gridSize, y:domainHalfExtent, z:potentialOverlay, w:reserved
     };
+    struct alignas(16) Gpu3dState {
+        glm::mat4 invViewProj;
+        glm::vec4 camPos;   // xyz=cam, w=time
+        glm::vec4 params;   // x=gridSize, y=domainHalf, z=intensityScale, w=intensityRange
+        glm::vec4 render;   // x=colorMode, y=aspect, z=showPotential, w=sliceAxis
+        glm::vec4 march;    // x=stepCount, y=alphaScale, z=slicePos, w=reserved
+    };
 
     static constexpr int kMaxParticles = 250000;
 
@@ -504,6 +622,13 @@ private:
     wgfx::Uniform* tdseStorage_ = nullptr;
     wgfx::Pipeline* pipelineOrbital_ = nullptr;
     wgfx::Pipeline* pipeline2d_ = nullptr;
+
+    std::unique_ptr<wgfx::VertexBuffer> vbo3d_;
+    std::unique_ptr<wgfx::IndexBuffer> ibo3d_;
+    wgfx::Uniform* stateUniform3d_ = nullptr;
+    wgfx::Uniform* tdseStorage3d_ = nullptr;
+    wgfx::Pipeline* pipeline3d_ = nullptr;
+
     RenderPath renderPath_ = RenderPath::Orbital;
 
     OrbitCamera camera_;
@@ -596,6 +721,54 @@ private:
     bool prevT_ = false;
     bool prevG_ = false;
 
+    // ---- 3D TDSE state ----
+    static constexpr int kMaxTdse3dGrid = 64;
+    Gpu3dState gpu3dState_{};
+    int tdse3dGridSize_         = 48;
+    float tdse3dDomainHalf_     = 12.0f;
+    float tdse3dDt_             = 0.06f;
+    int tdse3dSubsteps_         = 4;
+    int tdse3dIntegrator_       = 1;  // 0=Euler, 1=CN
+    float tdse3dIntensityScale_ = 1.0f;
+    float tdse3dIntensityRange_ = 0.3f;
+    int tdse3dColorMode_        = 9;  // phase by default
+    int tdse3dSliceAxis_        = -1; // -1=volume, 0/1/2=x/y/z
+    float tdse3dSlicePos_       = 0.0f;
+    float tdse3dMarchSteps_     = 96.0f;
+    float tdse3dAlphaScale_     = 0.08f;
+    bool tdse3dShowPotential_   = false;
+    bool tdse3dUseAbsorbing_    = true;
+    float tdse3dAbsorbWidth_    = 3.0f;
+    float tdse3dAbsorbStrength_ = 12.0f;
+    float tdse3dTime_           = 0.0f;
+
+    enum class Potential3dType : int {
+        Free = 0,
+        HarmonicWell = 1,
+        CoulombWell = 2,
+        SphericalBarrier = 3,
+        DoubleWell = 4
+    };
+    Potential3dType tdse3dPotType_ = Potential3dType::Free;
+    float tdse3dPotStrength_  = 0.5f;
+    float tdse3dPotRadius_    = 4.0f;
+    glm::vec3 tdse3dPacketPos_  = glm::vec3(-4.0f, 0.0f, 0.0f);
+    glm::vec3 tdse3dPacketMom_  = glm::vec3(2.0f,  0.0f, 0.0f);
+    float tdse3dSigma_          = 2.0f;
+
+    bool tdse3dNeedsReset_    = true;
+    bool tdse3dPotDirty_      = true;
+    int  tdse3dNormCounter_   = 0;
+
+    std::vector<float> tdse3dReal_;
+    std::vector<float> tdse3dImag_;
+    std::vector<float> tdse3dNextReal_;
+    std::vector<float> tdse3dNextImag_;
+    std::vector<float> tdse3dRhsReal_;
+    std::vector<float> tdse3dRhsImag_;
+    std::vector<float> tdse3dPot_;
+    std::vector<float> tdse3dUpload_;
+
     Quad() {
         pipelineOrbital_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "atoms_sphere.wgsl").c_str()));
         pipeline = pipelineOrbital_;
@@ -623,6 +796,21 @@ private:
         pipeline2d_->useDepth = false;
         init2dBuffers();
         pipeline2d_->init(vbo2d_.get());
+
+        pipeline3d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "tdse3d.wgsl").c_str()));
+        stateUniform3d_ = wgfx::createUniform(0, sizeof(Gpu3dState), reinterpret_cast<const float*>(&gpu3dState_));
+        pipeline3d_->setUniform(stateUniform3d_);
+        resize3dBuffers();
+        tdseStorage3d_ = wgfx::createStorage(
+            1,
+            static_cast<size_t>(kMaxTdse3dGrid) * static_cast<size_t>(kMaxTdse3dGrid) * static_cast<size_t>(kMaxTdse3dGrid) * 4 * sizeof(float),
+            nullptr,
+            true);
+        pipeline3d_->uniforms.setStorage(tdseStorage3d_);
+        pipeline3d_->targets = 1;
+        pipeline3d_->useDepth = false;
+        init3dBuffers();
+        pipeline3d_->init(vbo3d_.get());
     }
 
     Quad(const Quad&) = delete;
@@ -662,6 +850,337 @@ private:
         ibo2d_.reset(wgfx::createIndexBuffer(indices));
         pipeline2d_->setVertexBuffer(vbo2d_.get());
         pipeline2d_->setIndexBuffer(ibo2d_.get());
+    }
+
+    void init3dBuffers() {
+        const std::vector<float> vertices = {
+            -1.0f, -1.0f, 0.0f,
+             1.0f, -1.0f, 0.0f,
+             1.0f,  1.0f, 0.0f,
+            -1.0f,  1.0f, 0.0f
+        };
+        const std::vector<uint32_t> indices = { 0, 1, 2, 0, 2, 3 };
+        vbo3d_.reset(wgfx::createVertexBuffer(vertices));
+        vbo3d_->setTopology(PrimitiveTopology::TriangleList);
+        vbo3d_->setAttribute(0, wgfx::vec3f, 0);
+        ibo3d_.reset(wgfx::createIndexBuffer(indices));
+        pipeline3d_->setVertexBuffer(vbo3d_.get());
+        pipeline3d_->setIndexBuffer(ibo3d_.get());
+    }
+
+    void resize3dBuffers() {
+        tdse3dGridSize_ = std::clamp(tdse3dGridSize_, 8, kMaxTdse3dGrid);
+        const size_t N = static_cast<size_t>(tdse3dGridSize_);
+        const size_t total = N * N * N;
+        tdse3dReal_.assign(total, 0.0f);
+        tdse3dImag_.assign(total, 0.0f);
+        tdse3dNextReal_.assign(total, 0.0f);
+        tdse3dNextImag_.assign(total, 0.0f);
+        tdse3dRhsReal_.assign(total, 0.0f);
+        tdse3dRhsImag_.assign(total, 0.0f);
+        tdse3dPot_.assign(total, 0.0f);
+        tdse3dUpload_.assign(total * 4, 0.0f);
+        tdse3dPotDirty_ = true;
+        tdse3dNeedsReset_ = true;
+    }
+
+    void rebuild3dPotential() {
+        const int N = tdse3dGridSize_;
+        const float h = std::max(tdse3dDomainHalf_, 1.0f);
+        const float dx = (2.0f * h) / static_cast<float>(N - 1);
+        const float strength = std::max(tdse3dPotStrength_, 0.0f);
+        const float radius = std::max(tdse3dPotRadius_, 0.1f);
+
+        for (int iz = 0; iz < N; ++iz) {
+            const float z = -h + static_cast<float>(iz) * dx;
+            for (int iy = 0; iy < N; ++iy) {
+                const float y = -h + static_cast<float>(iy) * dx;
+                for (int ix = 0; ix < N; ++ix) {
+                    const float x = -h + static_cast<float>(ix) * dx;
+                    const size_t idx = static_cast<size_t>(iz) * static_cast<size_t>(N) * static_cast<size_t>(N)
+                                     + static_cast<size_t>(iy) * static_cast<size_t>(N)
+                                     + static_cast<size_t>(ix);
+                    const float r = std::sqrt(x*x + y*y + z*z);
+                    float v = 0.0f;
+                    switch (tdse3dPotType_) {
+                    case Potential3dType::Free:
+                        v = 0.0f;
+                        break;
+                    case Potential3dType::HarmonicWell:
+                        v = 0.5f * strength * r * r;
+                        break;
+                    case Potential3dType::CoulombWell:
+                        v = -strength / std::max(r, 0.3f);
+                        break;
+                    case Potential3dType::SphericalBarrier:
+                        v = (r <= radius) ? 0.0f : strength;
+                        break;
+                    case Potential3dType::DoubleWell: {
+                        const float r1 = std::sqrt((x - radius * 0.5f)*(x - radius * 0.5f) + y*y + z*z);
+                        const float r2 = std::sqrt((x + radius * 0.5f)*(x + radius * 0.5f) + y*y + z*z);
+                        v = -strength / std::max(r1, 0.3f) - strength / std::max(r2, 0.3f);
+                        break;
+                    }
+                    }
+                    tdse3dPot_[idx] = v;
+                }
+            }
+        }
+        tdse3dPotDirty_ = false;
+    }
+
+    void reset3dWavefunction() {
+        if (tdse3dPotDirty_) { rebuild3dPotential(); }
+        const int N = tdse3dGridSize_;
+        const float h = std::max(tdse3dDomainHalf_, 1.0f);
+        const float dx = (2.0f * h) / static_cast<float>(N - 1);
+        const float sig = std::max(tdse3dSigma_, 0.1f);
+        const float inv2s2 = 1.0f / (2.0f * sig * sig);
+        const glm::vec3 c = tdse3dPacketPos_;
+        const glm::vec3 p = tdse3dPacketMom_;
+
+        float norm = 0.0f;
+        for (int iz = 0; iz < N; ++iz) {
+            const float z = -h + static_cast<float>(iz) * dx;
+            for (int iy = 0; iy < N; ++iy) {
+                const float y = -h + static_cast<float>(iy) * dx;
+                for (int ix = 0; ix < N; ++ix) {
+                    const float x = -h + static_cast<float>(ix) * dx;
+                    const size_t idx = static_cast<size_t>(iz)*static_cast<size_t>(N)*static_cast<size_t>(N)
+                                     + static_cast<size_t>(iy)*static_cast<size_t>(N)
+                                     + static_cast<size_t>(ix);
+                    const float dx_ = x - c.x;
+                    const float dy_ = y - c.y;
+                    const float dz_ = z - c.z;
+                    const float env = std::exp(-(dx_*dx_ + dy_*dy_ + dz_*dz_) * inv2s2);
+                    const float phase = p.x * dx_ + p.y * dy_ + p.z * dz_;
+                    tdse3dReal_[idx] = env * std::cos(phase);
+                    tdse3dImag_[idx] = env * std::sin(phase);
+                    norm += (tdse3dReal_[idx]*tdse3dReal_[idx] + tdse3dImag_[idx]*tdse3dImag_[idx]);
+                }
+            }
+        }
+        if (norm > 1e-12f) {
+            const float inv = 1.0f / std::sqrt(norm);
+            for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
+                tdse3dReal_[i] *= inv;
+                tdse3dImag_[i] *= inv;
+            }
+        }
+        tdse3dNeedsReset_ = false;
+        tdse3dNormCounter_ = 0;
+        tdse3dTime_ = 0.0f;
+    }
+
+    // 3D FDTD: Euler or Crank-Nicolson (fixed-point) step.
+    // i ∂ψ/∂t = (-½∇³ + V) ψ  in grid units (dx=1).
+    void step3dSimulation() {
+        if (tdse3dPotDirty_)   { rebuild3dPotential(); }
+        if (tdse3dNeedsReset_) { reset3dWavefunction(); }
+
+        const int N  = tdse3dGridSize_;
+        const int N2 = N * N;
+        const int N3 = N * N2;
+        if (N < 4 || static_cast<int>(tdse3dReal_.size()) != N3) { return; }
+
+        const float h = std::max(tdse3dDomainHalf_, 1.0f);
+        const float dx = (2.0f * h) / static_cast<float>(N - 1);
+        const float dt = std::clamp(tdse3dDt_, 1e-6f, 2.0f);
+        const int steps = std::clamp(tdse3dSubsteps_, 1, 16);
+        const float absW = std::clamp(tdse3dAbsorbWidth_, 0.1f, h * 0.9f);
+        const float absS = std::max(tdse3dAbsorbStrength_, 0.0f);
+        const bool absorb = tdse3dUseAbsorbing_;
+        const int CN_ITERS = 4;
+
+        // Inline lambda for 3D 6-point Laplacian
+        auto laplacian = [&](const std::vector<float>& field, int ix, int iy, int iz) -> float {
+            const int center = iz*N2 + iy*N + ix;
+            const int xm = iz*N2 + iy*N + std::max(ix-1, 0);
+            const int xp = iz*N2 + iy*N + std::min(ix+1, N-1);
+            const int ym = iz*N2 + std::max(iy-1,0)*N + ix;
+            const int yp = iz*N2 + std::min(iy+1,N-1)*N + ix;
+            const int zm = std::max(iz-1,0)*N2 + iy*N + ix;
+            const int zp = std::min(iz+1,N-1)*N2 + iy*N + ix;
+            return field[xm] + field[xp] + field[ym] + field[yp] + field[zm] + field[zp] - 6.0f * field[center];
+        };
+
+        auto applyAbsorb = [&](std::vector<float>& re, std::vector<float>& im) {
+            if (!absorb) { return; }
+            for (int iz = 0; iz < N; ++iz) {
+                for (int iy = 0; iy < N; ++iy) {
+                    for (int ix = 0; ix < N; ++ix) {
+                        const float edge = static_cast<float>(std::min({ix, N-1-ix, iy, N-1-iy, iz, N-1-iz})) * dx;
+                        if (edge < absW) {
+                            const float s = 1.0f - (edge / absW);
+                            const float damp = std::exp(-absS * s * s * dt);
+                            const int idx = iz*N2 + iy*N + ix;
+                            re[idx] *= damp;
+                            im[idx] *= damp;
+                        }
+                    }
+                }
+            }
+        };
+
+        for (int step = 0; step < steps; ++step) {
+            if (tdse3dIntegrator_ == 0) {
+                // Explicit Euler
+                for (int iz = 1; iz < N-1; ++iz) {
+                    for (int iy = 1; iy < N-1; ++iy) {
+                        for (int ix = 1; ix < N-1; ++ix) {
+                            const int idx = iz*N2 + iy*N + ix;
+                            const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
+                            const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
+                            const float V = tdse3dPot_[idx];
+                            const float re = tdse3dReal_[idx];
+                            const float im = tdse3dImag_[idx];
+                            tdse3dNextReal_[idx] = re + dt * (-0.5f * lapI + V * im);
+                            tdse3dNextImag_[idx] = im + dt * ( 0.5f * lapR - V * re);
+                        }
+                    }
+                }
+            } else {
+                // Crank-Nicolson with fixed-point iterations
+                // 1) Build RHS from old psi
+                for (int iz = 1; iz < N-1; ++iz) {
+                    for (int iy = 1; iy < N-1; ++iy) {
+                        for (int ix = 1; ix < N-1; ++ix) {
+                            const int idx = iz*N2 + iy*N + ix;
+                            const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
+                            const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
+                            const float V = tdse3dPot_[idx];
+                            const float re = tdse3dReal_[idx];
+                            const float im = tdse3dImag_[idx];
+                            tdse3dRhsReal_[idx] = re + 0.5f * dt * (-0.5f * lapI + V * im);
+                            tdse3dRhsImag_[idx] = im + 0.5f * dt * ( 0.5f * lapR - V * re);
+                        }
+                    }
+                }
+                // 2) Fixed-point iterations (initial guess = old psi)
+                for (int iter = 0; iter < CN_ITERS; ++iter) {
+                    for (int iz = 1; iz < N-1; ++iz) {
+                        for (int iy = 1; iy < N-1; ++iy) {
+                            for (int ix = 1; ix < N-1; ++ix) {
+                                const int idx = iz*N2 + iy*N + ix;
+                                const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
+                                const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
+                                const float V = tdse3dPot_[idx];
+                                const float re = tdse3dReal_[idx];
+                                const float im = tdse3dImag_[idx];
+                                tdse3dNextReal_[idx] = tdse3dRhsReal_[idx] + 0.5f * dt * (-0.5f * lapI + V * im);
+                                tdse3dNextImag_[idx] = tdse3dRhsImag_[idx] + 0.5f * dt * ( 0.5f * lapR - V * re);
+                            }
+                        }
+                    }
+                    if (iter < CN_ITERS - 1) {
+                        tdse3dReal_.swap(tdse3dNextReal_);
+                        tdse3dImag_.swap(tdse3dNextImag_);
+                    }
+                }
+            }
+
+            // Zero Dirichlet boundary
+            for (int iz = 0; iz < N; ++iz) for (int iy = 0; iy < N; ++iy) {
+                tdse3dNextReal_[iz*N2+iy*N+0]   = 0.0f; tdse3dNextImag_[iz*N2+iy*N+0]   = 0.0f;
+                tdse3dNextReal_[iz*N2+iy*N+N-1] = 0.0f; tdse3dNextImag_[iz*N2+iy*N+N-1] = 0.0f;
+            }
+            for (int iz = 0; iz < N; ++iz) for (int ix = 0; ix < N; ++ix) {
+                tdse3dNextReal_[iz*N2+0*N+ix]   = 0.0f; tdse3dNextImag_[iz*N2+0*N+ix]   = 0.0f;
+                tdse3dNextReal_[iz*N2+(N-1)*N+ix] = 0.0f; tdse3dNextImag_[iz*N2+(N-1)*N+ix] = 0.0f;
+            }
+            for (int iy = 0; iy < N; ++iy) for (int ix = 0; ix < N; ++ix) {
+                tdse3dNextReal_[0*N2+iy*N+ix]   = 0.0f; tdse3dNextImag_[0*N2+iy*N+ix]   = 0.0f;
+                tdse3dNextReal_[(N-1)*N2+iy*N+ix] = 0.0f; tdse3dNextImag_[(N-1)*N2+iy*N+ix] = 0.0f;
+            }
+
+            applyAbsorb(tdse3dNextReal_, tdse3dNextImag_);
+
+            tdse3dReal_.swap(tdse3dNextReal_);
+            tdse3dImag_.swap(tdse3dNextImag_);
+            tdse3dTime_ += dt;
+        }
+
+        ++tdse3dNormCounter_;
+        if (tdse3dNormCounter_ >= 10) {
+            float norm = 0.0f;
+            for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
+                norm += tdse3dReal_[i]*tdse3dReal_[i] + tdse3dImag_[i]*tdse3dImag_[i];
+            }
+            if (norm > 1e-12f) {
+                const float inv = 1.0f / std::sqrt(norm);
+                for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
+                    tdse3dReal_[i] *= inv;
+                    tdse3dImag_[i] *= inv;
+                }
+            }
+            tdse3dNormCounter_ = 0;
+        }
+    }
+
+    void upload3dField() {
+        if (!tdseStorage3d_ || tdse3dUpload_.empty() || tdse3dPot_.empty()) { return; }
+
+        float maxPot = 0.0f;
+        for (float v : tdse3dPot_) { maxPot = std::max(maxPot, std::abs(v)); }
+        const float invMaxPot = (maxPot > 1e-6f) ? (1.0f / maxPot) : 0.0f;
+
+        const size_t total = tdse3dReal_.size();
+        for (size_t i = 0; i < total; ++i) {
+            const float re = tdse3dReal_[i];
+            const float im = tdse3dImag_[i];
+            const float rho = re*re + im*im;
+            float phase01 = std::atan2(im, re) / (2.0f * kPi);
+            if (phase01 < 0.0f) { phase01 += 1.0f; }
+            const float pot01 = 0.5f + 0.5f * tdse3dPot_[i] * invMaxPot;
+            const size_t base = i * 4;
+            tdse3dUpload_[base + 0] = rho;
+            tdse3dUpload_[base + 1] = phase01;
+            tdse3dUpload_[base + 2] = pot01;
+            tdse3dUpload_[base + 3] = 1.0f;
+        }
+        pipeline3d_->uniforms.updateStorageBuffer(tdseStorage3d_, tdse3dUpload_.data(), tdse3dUpload_.size() * sizeof(float));
+    }
+
+    void render3d(float dt) {
+        step3dSimulation();
+        upload3dField();
+
+        int width = 1280, height = 720;
+        SDL_GetWindowSize(Context::Instance().window, &width, &height);
+        const float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
+
+        ImGuiIO& io = ImGui::GetIO();
+        const float wheel = Context::Instance().consumeWheelDelta();
+        camera_.process(dt, !io.WantCaptureMouse, wheel);
+
+        const glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 2000.0f);
+        const glm::mat4 view = glm::lookAt(camera_.position(), camera_.target, glm::vec3(0, 1, 0));
+        const glm::mat4 vp   = proj * view;
+        const glm::mat4 invVP = glm::inverse(vp);
+
+        gpu3dState_.invViewProj = invVP;
+        const glm::vec3 cp = camera_.position();
+        gpu3dState_.camPos  = glm::vec4(cp, tdse3dTime_);
+        gpu3dState_.params  = glm::vec4(
+            static_cast<float>(tdse3dGridSize_),
+            std::max(tdse3dDomainHalf_, 0.5f),
+            std::max(tdse3dIntensityScale_, 0.0001f),
+            std::max(tdse3dIntensityRange_, 0.0001f));
+        gpu3dState_.render  = glm::vec4(
+            static_cast<float>(tdse3dColorMode_),
+            aspect,
+            tdse3dShowPotential_ ? 1.0f : 0.0f,
+            static_cast<float>(tdse3dSliceAxis_));
+        gpu3dState_.march   = glm::vec4(
+            tdse3dMarchSteps_,
+            tdse3dAlphaScale_,
+            tdse3dSlicePos_,
+            0.0f);
+
+        pipeline3d_->updateUniform(stateUniform3d_, reinterpret_cast<const float*>(&gpu3dState_));
+        pipeline3d_->setVertexBuffer(vbo3d_.get());
+        pipeline3d_->setIndexBuffer(ibo3d_.get());
+        pipeline = pipeline3d_;
     }
 
     static float factorialIntCpu(int v) {
