@@ -256,6 +256,7 @@ public:
                 ImGui::SliderFloat("double-slit half-height", &tdseSlitHalfHeight_, 0.05f, 2.5f, "%.2f");
                 ImGui::SliderFloat("domain half-size", &tdseDomainHalfExtent_, 4.0f, 40.0f, "%.2f");
                 ImGui::SliderInt("fdtd grid", &gridSize, 64, 320);
+                ImGui::Combo("integrator", &tdseIntegrator_, "Euler\0Crank-Nicolson\0");
                 ImGui::SliderInt("substeps/frame", &tdseSubstepsPerFrame_, 1, 32);
                 ImGui::SliderFloat("dt", &tdseDt_, 1e-6f, 2e-3f, "%.6f", ImGuiSliderFlags_Logarithmic);
                 ImGui::SliderFloat2("packet center", glm::value_ptr(tdsePacketCenter_), -40.0f, 40.0f, "%.2f");
@@ -555,6 +556,7 @@ private:
     float tdseDomainHalfExtent_ = 22.0f;
     float tdseDt_ = 0.00018f;
     int tdseSubstepsPerFrame_ = 8;
+    int tdseIntegrator_ = 1;
     Potential2dType tdsePotentialType_ = Potential2dType::SquareWell;
     float tdsePotentialStrength_ = 4.0f;
     float tdseSquareHalfWidth_ = 3.2f;
@@ -580,6 +582,8 @@ private:
     std::vector<float> tdseImag_;
     std::vector<float> tdseNextReal_;
     std::vector<float> tdseNextImag_;
+    std::vector<float> tdseRhsReal_;
+    std::vector<float> tdseRhsImag_;
     std::vector<float> tdsePotential_;
     std::vector<float> tdseUpload_;
 
@@ -748,6 +752,8 @@ private:
         tdseImag_.assign(cellCount, 0.0f);
         tdseNextReal_.assign(cellCount, 0.0f);
         tdseNextImag_.assign(cellCount, 0.0f);
+        tdseRhsReal_.assign(cellCount, 0.0f);
+        tdseRhsImag_.assign(cellCount, 0.0f);
         tdsePotential_.assign(cellCount, 0.0f);
         tdseUpload_.assign(cellCount * 4, 0.0f);
         tdsePotentialDirty_ = true;
@@ -868,7 +874,7 @@ private:
         twoDTime_ = 0.0f;
     }
 
-    void stepTdseSimulation() {
+void stepTdseSimulation() {
         if (!twoDUseTdse_) {
             return;
         }
@@ -893,23 +899,72 @@ private:
         const float absorbStrength = std::max(tdseAbsorbStrength_, 0.0f);
 
         for (int step = 0; step < steps; ++step) {
-            for (int iy = 1; iy < n - 1; ++iy) {
-                for (int ix = 1; ix < n - 1; ++ix) {
-                    const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
-                    const size_t left = idx - 1;
-                    const size_t right = idx + 1;
-                    const size_t down = idx - static_cast<size_t>(n);
-                    const size_t up = idx + static_cast<size_t>(n);
+            if (tdseIntegrator_ == 0) {
+                // Euler (Explicit)
+                for (int iy = 1; iy < n - 1; ++iy) {
+                    for (int ix = 1; ix < n - 1; ++ix) {
+                        const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                        const size_t left = idx - 1;
+                        const size_t right = idx + 1;
+                        const size_t down = idx - static_cast<size_t>(n);
+                        const size_t up = idx + static_cast<size_t>(n);
 
-                    const float lapI = (tdseImag_[left] + tdseImag_[right] + tdseImag_[down] + tdseImag_[up] - 4.0f * tdseImag_[idx]) * invDx2;
-                    const float lapR = (tdseReal_[left] + tdseReal_[right] + tdseReal_[down] + tdseReal_[up] - 4.0f * tdseReal_[idx]) * invDx2;
-                    const float v = tdsePotential_[idx];
+                        const float lapI = (tdseImag_[left] + tdseImag_[right] + tdseImag_[down] + tdseImag_[up] - 4.0f * tdseImag_[idx]) * invDx2;
+                        const float lapR = (tdseReal_[left] + tdseReal_[right] + tdseReal_[down] + tdseReal_[up] - 4.0f * tdseReal_[idx]) * invDx2;
+                        const float v = tdsePotential_[idx];
 
-                    tdseNextReal_[idx] = tdseReal_[idx] + dt * (-0.5f * lapI + v * tdseImag_[idx]);
-                    tdseNextImag_[idx] = tdseImag_[idx] + dt * (0.5f * lapR - v * tdseReal_[idx]);
+                        tdseNextReal_[idx] = tdseReal_[idx] + dt * (-0.5f * lapI + v * tdseImag_[idx]);
+                        tdseNextImag_[idx] = tdseImag_[idx] + dt * (0.5f * lapR - v * tdseReal_[idx]);
+                    }
+                }
+            } else {
+                // Crank-Nicolson
+                // 1) Explicit RHS
+                for (int iy = 1; iy < n - 1; ++iy) {
+                    for (int ix = 1; ix < n - 1; ++ix) {
+                        const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                        const size_t left = idx - 1;
+                        const size_t right = idx + 1;
+                        const size_t down = idx - static_cast<size_t>(n);
+                        const size_t up = idx + static_cast<size_t>(n);
+
+                        const float lapI = (tdseImag_[left] + tdseImag_[right] + tdseImag_[down] + tdseImag_[up] - 4.0f * tdseImag_[idx]) * invDx2;
+                        const float lapR = (tdseReal_[left] + tdseReal_[right] + tdseReal_[down] + tdseReal_[up] - 4.0f * tdseReal_[idx]) * invDx2;
+                        const float v = tdsePotential_[idx];
+
+                        tdseRhsReal_[idx] = tdseReal_[idx] + 0.5f * dt * (-0.5f * lapI + v * tdseImag_[idx]);
+                        tdseRhsImag_[idx] = tdseImag_[idx] + 0.5f * dt * (0.5f * lapR - v * tdseReal_[idx]);
+                    }
+                }
+
+                // 2) Fixed-point iteration
+                const int CN_ITERS = 10;
+                for (int iter = 0; iter < CN_ITERS; ++iter) {
+                    for (int iy = 1; iy < n - 1; ++iy) {
+                        for (int ix = 1; ix < n - 1; ++ix) {
+                            const size_t idx = static_cast<size_t>(iy) * static_cast<size_t>(n) + static_cast<size_t>(ix);
+                            const size_t left = idx - 1;
+                            const size_t right = idx + 1;
+                            const size_t down = idx - static_cast<size_t>(n);
+                            const size_t up = idx + static_cast<size_t>(n);
+
+                            const float lapI = (tdseImag_[left] + tdseImag_[right] + tdseImag_[down] + tdseImag_[up] - 4.0f * tdseImag_[idx]) * invDx2;
+                            const float lapR = (tdseReal_[left] + tdseReal_[right] + tdseReal_[down] + tdseReal_[up] - 4.0f * tdseReal_[idx]) * invDx2;
+                            const float v = tdsePotential_[idx];
+
+                            tdseNextReal_[idx] = tdseRhsReal_[idx] + 0.5f * dt * (-0.5f * lapI + v * tdseImag_[idx]);
+                            tdseNextImag_[idx] = tdseRhsImag_[idx] + 0.5f * dt * (0.5f * lapR - v * tdseReal_[idx]);
+                        }
+                    }
+
+                    if (iter < CN_ITERS - 1) {
+                        tdseReal_.swap(tdseNextReal_);
+                        tdseImag_.swap(tdseNextImag_);
+                    }
                 }
             }
 
+            // Boundary zeroing
             for (int i = 0; i < n; ++i) {
                 const size_t top = static_cast<size_t>(i);
                 const size_t bottom = static_cast<size_t>(n - 1) * static_cast<size_t>(n) + static_cast<size_t>(i);
