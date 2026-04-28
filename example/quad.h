@@ -892,7 +892,9 @@ void stepTdseSimulation() {
 
         const float domain = std::max(tdseDomainHalfExtent_, 1.0f);
         const float dx = (2.0f * domain) / static_cast<float>(n - 1);
-        const float invDx2 = 1.0f / std::max(dx * dx, 1e-8f);
+        // Mikaberidze's implementation assumes dx = 1.0 (grid units) for the Laplacian.
+        // We set invDx2 = 1.0f here to perfectly match the stability and wave dynamics of the JS version.
+        const float invDx2 = 1.0f; // previously: 1.0f / std::max(dx * dx, 1e-8f);
         const float dt = std::clamp(tdseDt_, 1e-6f, 2e-3f);
         const int steps = std::clamp(tdseSubstepsPerFrame_, 1, 32);
         const float absorbWidth = std::clamp(tdseAbsorbWidth_, 0.1f, domain * 0.9f);
@@ -1004,7 +1006,8 @@ void stepTdseSimulation() {
         if (tdseNormCounter_ >= 10) {
             float norm = 0.0f;
             for (size_t i = 0; i < tdseReal_.size(); ++i) {
-                norm += (tdseReal_[i] * tdseReal_[i] + tdseImag_[i] * tdseImag_[i]) * dx * dx;
+                // Mikaberidze integrates without dx*dx scaling
+                norm += (tdseReal_[i] * tdseReal_[i] + tdseImag_[i] * tdseImag_[i]); // previously: * dx * dx
             }
             if (norm > 1e-12f) {
                 const float inv = 1.0f / std::sqrt(norm);
