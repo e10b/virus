@@ -22,7 +22,7 @@ struct Tdse3dUniform {
 };
 
 @group(0) @binding(0) var<uniform>         u:       Tdse3dUniform;
-@group(0) @binding(1) var<storage, read>   waveB:   array<vec2f>;   // (re, im)
+@group(0) @binding(1) var<storage, read>   waveB:   array<u32>;     // (re, im) packed
 @group(0) @binding(2) var<storage, read>   potBuf:  array<f32>;
 
 @vertex
@@ -63,7 +63,7 @@ fn sampleRho(px: f32, py: f32, pz: f32, N: i32, h: f32) -> f32 {
     for (var dz = 0; dz < 2; dz++) {
         for (var dy = 0; dy < 2; dy++) {
             for (var dx = 0; dx < 2; dx++) {
-                let w = waveB[gridIndex(ic.x+dx, ic.y+dy, ic.z+dz, N)];
+                let w = unpack2x16float(waveB[gridIndex(ic.x+dx, ic.y+dy, ic.z+dz, N)]);
                 let r = w.x*w.x + w.y*w.y;
                 let wt = select(1.0-t.x, t.x, dx==1)
                        * select(1.0-t.y, t.y, dy==1)
@@ -82,7 +82,7 @@ fn samplePhase(px: f32, py: f32, pz: f32, N: i32, h: f32) -> f32 {
     let ix = clamp(i32(nx * f32(N-1)), 0, N-1);
     let iy = clamp(i32(ny * f32(N-1)), 0, N-1);
     let iz = clamp(i32(nz * f32(N-1)), 0, N-1);
-    let w  = waveB[gridIndex(ix, iy, iz, N)];
+    let w  = unpack2x16float(waveB[gridIndex(ix, iy, iz, N)]);
     var p  = atan2(w.y, w.x) / (2.0 * 3.14159265);
     if (p < 0.0) { p += 1.0; }
     return p;

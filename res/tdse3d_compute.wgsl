@@ -21,8 +21,13 @@ struct Tdse3dParams {
 };
 
 @group(0) @binding(0) var<uniform>             params  : Tdse3dParams;
-@group(0) @binding(1) var<storage, read_write> waveA   : array<vec2f>; // (re,im) current / iterate
-@group(0) @binding(2) var<storage, read_write> waveB   : array<vec2f>; // (re,im) next / rhs
+@group(0) @binding(1) var<storage, read_write> waveA   : array<u32>; // (re,im) packed current / iterate
+@group(0) @binding(2) var<storage, read_write> waveB   : array<u32>; // (re,im) packed next / rhs
+
+fn readWaveA(i: u32) -> vec2f { return unpack2x16float(waveA[i]); }
+fn writeWaveA(i: u32, v: vec2f) { waveA[i] = pack2x16float(v); }
+fn readWaveB(i: u32) -> vec2f { return unpack2x16float(waveB[i]); }
+fn writeWaveB(i: u32, v: vec2f) { waveB[i] = pack2x16float(v); }
 @group(0) @binding(3) var<storage, read>       potBuf  : array<f32>;
 
 // ---------------------------------------------------------------------------
@@ -34,10 +39,10 @@ fn idx3(ix: i32, iy: i32, iz: i32, N: i32) -> u32 {
 }
 
 fn lapA(ix: i32, iy: i32, iz: i32, N: i32) -> vec2f {
-    return waveA[idx3(ix-1,iy,iz,N)] + waveA[idx3(ix+1,iy,iz,N)]
-         + waveA[idx3(ix,iy-1,iz,N)] + waveA[idx3(ix,iy+1,iz,N)]
-         + waveA[idx3(ix,iy,iz-1,N)] + waveA[idx3(ix,iy,iz+1,N)]
-         - 6.0 * waveA[idx3(ix,iy,iz,N)];
+    return readWaveA(idx3(ix-1,iy,iz,N)) + readWaveA(idx3(ix+1,iy,iz,N))
+         + readWaveA(idx3(ix,iy-1,iz,N)) + readWaveA(idx3(ix,iy+1,iz,N))
+         + readWaveA(idx3(ix,iy,iz-1,N)) + readWaveA(idx3(ix,iy,iz+1,N))
+         - 6.0 * readWaveA(idx3(ix,iy,iz,N));
 }
 
 // i dψ/dt = (-½∇² + V)ψ  =>  dψ/dt.re = +½ lap.im - V*im
@@ -67,14 +72,14 @@ fn euler(@builtin(global_invocation_id) gid: vec3u) {
     let ix = i32(gid.x); let iy = i32(gid.y); let iz = i32(gid.z);
     if (ix >= N || iy >= N || iz >= N) { return; }
     let i = idx3(ix, iy, iz, N);
-    if (isBoundary(ix, iy, iz, N)) { waveB[i] = vec2f(0.0); return; }
+    if (isBoundary(ix, iy, iz, N)) { writeWaveB(i, vec2f(0.0)); return; }
 
-    let psi  = waveA[i];
+    let psi  = readWaveA(i);
     let lap  = lapA(ix, iy, iz, N);
     let V    = potBuf[i];
     let drhs = schrodRHS(psi, lap, V);
     let damp = absorbDamp(ix, iy, iz, N);
-    waveB[i] = (psi + params.dt * drhs) * damp;
+    writeWaveB(i, (psi + params.dt * drhs) * damp);
 }
 
 // ---------------------------------------------------------------------------
@@ -86,13 +91,13 @@ fn cn_rhs(@builtin(global_invocation_id) gid: vec3u) {
     let ix = i32(gid.x); let iy = i32(gid.y); let iz = i32(gid.z);
     if (ix >= N || iy >= N || iz >= N) { return; }
     let i = idx3(ix, iy, iz, N);
-    if (isBoundary(ix, iy, iz, N)) { waveB[i] = vec2f(0.0); return; }
+    if (isBoundary(ix, iy, iz, N)) { writeWaveB(i, vec2f(0.0)); return; }
 
-    let psi  = waveA[i];
+    let psi  = readWaveA(i);
     let lap  = lapA(ix, iy, iz, N);
     let V    = potBuf[i];
     // RHS = ψ_old + (dt/2) * F(ψ_old)
-    waveB[i] = psi + (params.dt * 0.5) * schrodRHS(psi, lap, V);
+    writeWaveB(i, psi + (params.dt * 0.5) * schrodRHS(psi, lap, V));
 }
 
 // ---------------------------------------------------------------------------
@@ -105,12 +110,12 @@ fn cn_iter(@builtin(global_invocation_id) gid: vec3u) {
     let ix = i32(gid.x); let iy = i32(gid.y); let iz = i32(gid.z);
     if (ix >= N || iy >= N || iz >= N) { return; }
     let i = idx3(ix, iy, iz, N);
-    if (isBoundary(ix, iy, iz, N)) { waveA[i] = vec2f(0.0); return; }
+    if (isBoundary(ix, iy, iz, N)) { writeWaveA(i, vec2f(0.0)); return; }
 
-    let rhsVal = waveB[i];
+    let rhsVal = readWaveB(i);
     let lap    = lapA(ix, iy, iz, N);   // Laplacian of current waveA guess
     let V      = potBuf[i];
-    waveA[i]   = rhsVal + (params.dt * 0.5) * schrodRHS(waveA[i], lap, V);
+    writeWaveA(i, rhsVal + (params.dt * 0.5) * schrodRHS(readWaveA(i), lap, V));
 }
 
 // ---------------------------------------------------------------------------
@@ -123,5 +128,5 @@ fn cn_finish(@builtin(global_invocation_id) gid: vec3u) {
     let ix = i32(gid.x); let iy = i32(gid.y); let iz = i32(gid.z);
     if (ix >= N || iy >= N || iz >= N) { return; }
     let i = idx3(ix, iy, iz, N);
-    waveB[i] = waveA[i] * absorbDamp(ix, iy, iz, N);
+    writeWaveB(i, readWaveA(i) * absorbDamp(ix, iy, iz, N));
 }

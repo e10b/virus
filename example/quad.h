@@ -14,6 +14,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/packing.hpp>
 #include <glm/gtc/type_ptr.hpp>
 
 #include "context.h"
@@ -859,9 +860,9 @@ private:
         const size_t kMaxCells = static_cast<size_t>(kMaxTdse3dGrid)
                                * static_cast<size_t>(kMaxTdse3dGrid)
                                * static_cast<size_t>(kMaxTdse3dGrid);
-        // waveA and waveB: vec2f each (read-write for compute)
-        gpuWaveA_ = wgfx::createStorage(1, kMaxCells * 2 * sizeof(float), nullptr, false);
-        gpuWaveB_ = wgfx::createStorage(2, kMaxCells * 2 * sizeof(float), nullptr, false);
+        // waveA and waveB: u32 packed half2 each (read-write for compute)
+        gpuWaveA_ = wgfx::createStorage(1, kMaxCells * sizeof(uint32_t), nullptr, false);
+        gpuWaveB_ = wgfx::createStorage(2, kMaxCells * sizeof(uint32_t), nullptr, false);
         // pot: f32 each (read-only everywhere)
         gpuPot_   = wgfx::createStorage(3, kMaxCells     * sizeof(float), nullptr, true);
 
@@ -1083,17 +1084,16 @@ private:
         tdse3dTime_ = 0.0f;
         // Pack (re, im) interleaved and upload to waveA on GPU
         if (gpuWaveA_) {
-            std::vector<float> packed(tdse3dReal_.size() * 2);
+            std::vector<uint32_t> packed(tdse3dReal_.size());
             for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
-                packed[i*2+0] = tdse3dReal_[i];
-                packed[i*2+1] = tdse3dImag_[i];
+                packed[i] = glm::packHalf2x16(glm::vec2(tdse3dReal_[i], tdse3dImag_[i]));
             }
             wgfx::queue.writeBuffer(gpuWaveA_->buffer, 0,
-                packed.data(), packed.size() * sizeof(float));
+                packed.data(), packed.size() * sizeof(uint32_t));
             // Zero waveB so the render shader starts clean
-            std::vector<float> zeros(packed.size(), 0.0f);
+            std::vector<uint32_t> zeros(packed.size(), 0);
             wgfx::queue.writeBuffer(gpuWaveB_->buffer, 0,
-                zeros.data(), zeros.size() * sizeof(float));
+                zeros.data(), zeros.size() * sizeof(uint32_t));
         }
     }
 
