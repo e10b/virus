@@ -64,6 +64,10 @@ int main()
 
 		wgfx::touch(color);
 
+		// Run GPU compute (FDTD step) — must happen BEFORE the render pass
+		// so the updated waveB storage buffer is ready for the fragment shader.
+		quad.dispatchCompute3d();
+
 		// Render the fullscreen quad with analytic sphere ray tracing in fragment WGSL.
 		pass.prepare();
 			quad.render(dt);

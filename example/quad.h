@@ -51,6 +51,15 @@ public:
     float orbitSpeed = 0.01f;
     float zoomSpeed = 10.0f;
 
+    // Reset to sensible defaults for a given domain half-extent
+    void resetForDomain(float domainHalf) {
+        target    = glm::vec3(0.0f);
+        radius    = domainHalf * 3.0f;
+        azimuth   = 0.8f;
+        elevation = 1.1f;
+        dragging_ = false;
+    }
+
     glm::vec3 position() const {
         float e = glm::clamp(elevation, 0.01f, 3.14159265358979323846f - 0.01f);
         return target + glm::vec3(
@@ -110,6 +119,17 @@ public:
     }
 
     wgfx::Pipeline* pipeline = nullptr;
+
+    // Called from main.cpp before the render pass when in 3D TDSE mode.
+    // The ComputePass must be begun/ended around this call.
+    wgfx::ComputePass computePass3d;
+
+    void dispatchCompute3d() {
+        if (renderPath_ != RenderPath::Path3D) return;
+        computePass3d.prepare();
+        dispatchCompute(computePass3d);
+        computePass3d.end();
+    }
 
     void render(float dt) {
         if (renderPath_ == RenderPath::Path2D) {
@@ -192,6 +212,8 @@ public:
                 pipeline = pipeline3d_;
                 pipeline->setVertexBuffer(vbo3d_.get());
                 pipeline->setIndexBuffer(ibo3d_.get());
+                // Snap the 3D camera to fit the current domain on first switch
+                camera3d_.resetForDomain(tdse3dDomainHalf_);
             } else {
                 pipeline = pipelineOrbital_;
                 pipeline->setVertexBuffer(vbo_.get());
@@ -263,7 +285,18 @@ public:
                 tdse3dNeedsReset_ = true;
             }
             ImGui::SameLine();
+            if (ImGui::Button("Fit camera")) {
+                camera3d_.resetForDomain(tdse3dDomainHalf_);
+            }
+            ImGui::SameLine();
             ImGui::Text("t = %.3f", tdse3dTime_);
+
+            if (ImGui::CollapsingHeader("3D Camera")) {
+                const glm::vec3 cp3 = camera3d_.position();
+                ImGui::Text("pos: (%.2f, %.2f, %.2f)", cp3.x, cp3.y, cp3.z);
+                ImGui::Text("radius: %.2f", camera3d_.radius);
+                ImGui::SliderFloat("orbit speed##3d", &camera3d_.orbitSpeed, 0.001f, 0.05f, "%.4f");
+            }
 
             // Commit
             tdse3dIntegrator_ = integrator;
@@ -631,7 +664,8 @@ private:
 
     RenderPath renderPath_ = RenderPath::Orbital;
 
-    OrbitCamera camera_;
+    OrbitCamera camera_;   // Orbital / 2D camera
+    OrbitCamera camera3d_; // 3D TDSE camera — tight defaults set in init3dCamera()
     QuantumState quantum_;
     ClipState clip_;
 
@@ -722,9 +756,9 @@ private:
     bool prevG_ = false;
 
     // ---- 3D TDSE state ----
-    static constexpr int kMaxTdse3dGrid = 64;
+    static constexpr int kMaxTdse3dGrid = 128;
     Gpu3dState gpu3dState_{};
-    int tdse3dGridSize_         = 48;
+    int tdse3dGridSize_         = 80;
     float tdse3dDomainHalf_     = 12.0f;
     float tdse3dDt_             = 0.06f;
     int tdse3dSubsteps_         = 4;
@@ -760,14 +794,34 @@ private:
     bool tdse3dPotDirty_      = true;
     int  tdse3dNormCounter_   = 0;
 
+    // CPU-side scratch for initial upload only
     std::vector<float> tdse3dReal_;
     std::vector<float> tdse3dImag_;
-    std::vector<float> tdse3dNextReal_;
-    std::vector<float> tdse3dNextImag_;
-    std::vector<float> tdse3dRhsReal_;
-    std::vector<float> tdse3dRhsImag_;
     std::vector<float> tdse3dPot_;
-    std::vector<float> tdse3dUpload_;
+
+    // GPU compute pipeline objects
+    struct alignas(16) GpuComputeParams {
+        uint32_t gridN;
+        uint32_t mode;         // 0=Euler, 1=CN
+        float    dt;
+        float    absorbWidth;
+        float    absorbStr;
+        float    dx;
+        float    _pad0;
+        float    _pad1;
+    };
+    GpuComputeParams gpuComputeParams_{};
+
+    wgfx::Compute*  computeEuler_    = nullptr; // entry="euler"
+    wgfx::Compute*  computeCnRhs_    = nullptr; // entry="cn_rhs"
+    wgfx::Compute*  computeCnIter_   = nullptr; // entry="cn_iter"
+    wgfx::Compute*  computeCnFinish_ = nullptr; // entry="cn_finish"
+
+    // Shared storage buffers (allocated to kMaxTdse3dGrid³)
+    wgfx::Uniform*  computeParamsUni_ = nullptr; // binding 0 — uniform
+    wgfx::Uniform*  gpuWaveA_         = nullptr; // binding 1 — vec2f (re,im)
+    wgfx::Uniform*  gpuWaveB_         = nullptr; // binding 2 — vec2f (re,im)  (also render binding 1)
+    wgfx::Uniform*  gpuPot_           = nullptr; // binding 3 — f32   potential (also render binding 2)
 
     Quad() {
         pipelineOrbital_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "atoms_sphere.wgsl").c_str()));
@@ -799,18 +853,75 @@ private:
 
         pipeline3d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "tdse3d.wgsl").c_str()));
         stateUniform3d_ = wgfx::createUniform(0, sizeof(Gpu3dState), reinterpret_cast<const float*>(&gpu3dState_));
+        // setUniform done below after storage buffers are ready
+
+        // ---- Allocate shared GPU storage buffers (kMaxTdse3dGrid³) ----
+        const size_t kMaxCells = static_cast<size_t>(kMaxTdse3dGrid)
+                               * static_cast<size_t>(kMaxTdse3dGrid)
+                               * static_cast<size_t>(kMaxTdse3dGrid);
+        // waveA and waveB: vec2f each (read-write for compute)
+        gpuWaveA_ = wgfx::createStorage(1, kMaxCells * 2 * sizeof(float), nullptr, false);
+        gpuWaveB_ = wgfx::createStorage(2, kMaxCells * 2 * sizeof(float), nullptr, false);
+        // pot: f32 each (read-only everywhere)
+        gpuPot_   = wgfx::createStorage(3, kMaxCells     * sizeof(float), nullptr, true);
+
+        // ---- Render pipeline: read-only, fragment-only storage bindings ----
+        // Wrapping the same GPU buffers without ownership to avoid double-free.
+        // Fragment-only visibility avoids VERTEX_WRITABLE_STORAGE requirement.
+        auto makeRenderStorage = [](wgfx::Uniform* src, int binding, bool readOnly) -> wgfx::Uniform* {
+            wgfx::Uniform* u = new wgfx::Uniform();
+            u->ownsBuffer    = false;          // don't free — src owns it
+            u->isReadOnly    = readOnly;
+            u->binding       = binding;
+            u->minBindingSize = src->minBindingSize;
+            u->buffer        = src->buffer;    // shared handle
+            u->entry.binding = static_cast<uint32_t>(binding);
+            u->entry.buffer  = src->buffer;    // same as createStorage: entry.buffer = buffer
+            u->entry.offset  = 0;
+            u->entry.size    = static_cast<uint64_t>(src->minBindingSize);
+            return u;
+        };
+        wgfx::Uniform* renderWaveB = makeRenderStorage(gpuWaveB_, 1, true);
+        wgfx::Uniform* renderPot   = makeRenderStorage(gpuPot_,   2, true);
+
         pipeline3d_->setUniform(stateUniform3d_);
-        resize3dBuffers();
-        tdseStorage3d_ = wgfx::createStorage(
-            1,
-            static_cast<size_t>(kMaxTdse3dGrid) * static_cast<size_t>(kMaxTdse3dGrid) * static_cast<size_t>(kMaxTdse3dGrid) * 4 * sizeof(float),
-            nullptr,
-            true);
-        pipeline3d_->uniforms.setStorage(tdseStorage3d_);
+        // Use fragment-only visibility for storage so no VERTEX_WRITABLE_STORAGE needed
+        pipeline3d_->uniforms.visibility = WGPUShaderStage_Fragment;
+        pipeline3d_->uniforms.setStorage(renderWaveB);
+        pipeline3d_->uniforms.setStorage(renderPot);
+        pipeline3d_->uniforms.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment; // restore
         pipeline3d_->targets = 1;
         pipeline3d_->useDepth = false;
         init3dBuffers();
         pipeline3d_->init(vbo3d_.get());
+
+        // ---- Build compute pipelines (all share one WGSL, different entry points) ----
+        const std::string computeSrc = wgfx::loadFromFile(
+            (std::string(RESOURCE_DIR) + "/" + "tdse3d_compute.wgsl").c_str());
+
+        computeParamsUni_ = wgfx::createUniform(0, sizeof(GpuComputeParams),
+            reinterpret_cast<const float*>(&gpuComputeParams_));
+
+        auto makeCompute = [&](wgfx::Compute*& c, const std::string& entry) {
+            c = wgfx::loadCompute(computeSrc);
+            c->entryPoint = entry;   // picked up by fixed init()
+            c->setUniform(computeParamsUni_);
+            c->setStorage(gpuWaveA_);
+            c->setStorage(gpuWaveB_);
+            c->setStorage(gpuPot_);
+            c->init();
+        };
+        makeCompute(computeEuler_,    "euler");
+        makeCompute(computeCnRhs_,    "cn_rhs");
+        makeCompute(computeCnIter_,   "cn_iter");
+        makeCompute(computeCnFinish_, "cn_finish");
+
+
+        // ---- Initial sim state ----
+        resize3dBuffers();
+
+        // Initialize the dedicated 3D TDSE camera
+        camera3d_.resetForDomain(tdse3dDomainHalf_);
     }
 
     Quad(const Quad&) = delete;
@@ -874,12 +985,7 @@ private:
         const size_t total = N * N * N;
         tdse3dReal_.assign(total, 0.0f);
         tdse3dImag_.assign(total, 0.0f);
-        tdse3dNextReal_.assign(total, 0.0f);
-        tdse3dNextImag_.assign(total, 0.0f);
-        tdse3dRhsReal_.assign(total, 0.0f);
-        tdse3dRhsImag_.assign(total, 0.0f);
         tdse3dPot_.assign(total, 0.0f);
-        tdse3dUpload_.assign(total * 4, 0.0f);
         tdse3dPotDirty_ = true;
         tdse3dNeedsReset_ = true;
     }
@@ -927,6 +1033,11 @@ private:
             }
         }
         tdse3dPotDirty_ = false;
+        // Upload potential to GPU (read-only buffer)
+        if (gpuPot_) {
+            wgfx::queue.writeBuffer(gpuPot_->buffer, 0,
+                tdse3dPot_.data(), tdse3dPot_.size() * sizeof(float));
+        }
     }
 
     void reset3dWavefunction() {
@@ -970,196 +1081,114 @@ private:
         tdse3dNeedsReset_ = false;
         tdse3dNormCounter_ = 0;
         tdse3dTime_ = 0.0f;
+        // Pack (re, im) interleaved and upload to waveA on GPU
+        if (gpuWaveA_) {
+            std::vector<float> packed(tdse3dReal_.size() * 2);
+            for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
+                packed[i*2+0] = tdse3dReal_[i];
+                packed[i*2+1] = tdse3dImag_[i];
+            }
+            wgfx::queue.writeBuffer(gpuWaveA_->buffer, 0,
+                packed.data(), packed.size() * sizeof(float));
+            // Zero waveB so the render shader starts clean
+            std::vector<float> zeros(packed.size(), 0.0f);
+            wgfx::queue.writeBuffer(gpuWaveB_->buffer, 0,
+                zeros.data(), zeros.size() * sizeof(float));
+        }
     }
 
-    // 3D FDTD: Euler or Crank-Nicolson (fixed-point) step.
-    // i ∂ψ/∂t = (-½∇³ + V) ψ  in grid units (dx=1).
-    void step3dSimulation() {
+    // Dispatch GPU compute for one FDTD substep.
+    // Called by render3d(); the ComputePass is owned externally in main.cpp.
+    // Returns the number of workgroups per axis.
+    uint32_t computeWorkgroups() const {
+        return (static_cast<uint32_t>(tdse3dGridSize_) + 3u) / 4u;
+    }
+
+    void dispatchCompute(wgfx::ComputePass& cp) {
         if (tdse3dPotDirty_)   { rebuild3dPotential(); }
         if (tdse3dNeedsReset_) { reset3dWavefunction(); }
+        if (!computeEuler_)    { return; }
 
-        const int N  = tdse3dGridSize_;
-        const int N2 = N * N;
-        const int N3 = N * N2;
-        if (N < 4 || static_cast<int>(tdse3dReal_.size()) != N3) { return; }
+        const float h  = std::max(tdse3dDomainHalf_, 1.0f);
+        const float dx = (2.0f * h) / static_cast<float>(tdse3dGridSize_ - 1);
+        const float absW = tdse3dUseAbsorbing_
+            ? std::clamp(tdse3dAbsorbWidth_, 0.1f, h * 0.9f) : 0.0f;
 
-        const float h = std::max(tdse3dDomainHalf_, 1.0f);
-        const float dx = (2.0f * h) / static_cast<float>(N - 1);
-        const float dt = std::clamp(tdse3dDt_, 1e-6f, 2.0f);
-        const int steps = std::clamp(tdse3dSubsteps_, 1, 16);
-        const float absW = std::clamp(tdse3dAbsorbWidth_, 0.1f, h * 0.9f);
-        const float absS = std::max(tdse3dAbsorbStrength_, 0.0f);
-        const bool absorb = tdse3dUseAbsorbing_;
+        gpuComputeParams_.gridN       = static_cast<uint32_t>(tdse3dGridSize_);
+        gpuComputeParams_.mode        = static_cast<uint32_t>(tdse3dIntegrator_);
+        gpuComputeParams_.dt          = std::clamp(tdse3dDt_, 1e-6f, 2.0f);
+        gpuComputeParams_.absorbWidth = absW;
+        gpuComputeParams_.absorbStr   = std::max(tdse3dAbsorbStrength_, 0.0f);
+        gpuComputeParams_.dx          = dx;
+
+        // Write params ONCE at offset 0 — bypasses the accumulating dynamic
+        // offset counter that would overflow after ~106 frames.
+        wgfx::queue.writeBuffer(computeParamsUni_->buffer, 0,
+            &gpuComputeParams_, sizeof(GpuComputeParams));
+
+        // Pin every compute pipeline's dynamic offset for binding 0 to 0.
+        // This must match the write above (offset 0 in the uniform buffer).
+        auto pinOffset = [](wgfx::Compute* c) {
+            if (!c) return;
+            c->uniforms.dynamicOffsets.resize(1, 0);
+            c->uniforms.dynamicOffsets[0] = 0;
+            // Also reset the quantity so clear() won't accidentally re-advance it.
+            if (!c->uniforms.uniforms.empty())
+                c->uniforms.uniforms[0]->quantity = 0;
+        };
+        pinOffset(computeEuler_);
+        pinOffset(computeCnRhs_);
+        pinOffset(computeCnIter_);
+        pinOffset(computeCnFinish_);
+
+        const uint32_t wg = computeWorkgroups();
+        const int substeps = std::clamp(tdse3dSubsteps_, 1, 32);
         const int CN_ITERS = 4;
 
-        // Inline lambda for 3D 6-point Laplacian
-        auto laplacian = [&](const std::vector<float>& field, int ix, int iy, int iz) -> float {
-            const int center = iz*N2 + iy*N + ix;
-            const int xm = iz*N2 + iy*N + std::max(ix-1, 0);
-            const int xp = iz*N2 + iy*N + std::min(ix+1, N-1);
-            const int ym = iz*N2 + std::max(iy-1,0)*N + ix;
-            const int yp = iz*N2 + std::min(iy+1,N-1)*N + ix;
-            const int zm = std::max(iz-1,0)*N2 + iy*N + ix;
-            const int zp = std::min(iz+1,N-1)*N2 + iy*N + ix;
-            return field[xm] + field[xp] + field[ym] + field[yp] + field[zm] + field[zp] - 6.0f * field[center];
-        };
-
-        auto applyAbsorb = [&](std::vector<float>& re, std::vector<float>& im) {
-            if (!absorb) { return; }
-            for (int iz = 0; iz < N; ++iz) {
-                for (int iy = 0; iy < N; ++iy) {
-                    for (int ix = 0; ix < N; ++ix) {
-                        const float edge = static_cast<float>(std::min({ix, N-1-ix, iy, N-1-iy, iz, N-1-iz})) * dx;
-                        if (edge < absW) {
-                            const float s = 1.0f - (edge / absW);
-                            const float damp = std::exp(-absS * s * s * dt);
-                            const int idx = iz*N2 + iy*N + ix;
-                            re[idx] *= damp;
-                            im[idx] *= damp;
-                        }
-                    }
-                }
-            }
-        };
-
-        for (int step = 0; step < steps; ++step) {
+        for (int s = 0; s < substeps; ++s) {
             if (tdse3dIntegrator_ == 0) {
-                // Explicit Euler
-                for (int iz = 1; iz < N-1; ++iz) {
-                    for (int iy = 1; iy < N-1; ++iy) {
-                        for (int ix = 1; ix < N-1; ++ix) {
-                            const int idx = iz*N2 + iy*N + ix;
-                            const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
-                            const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
-                            const float V = tdse3dPot_[idx];
-                            const float re = tdse3dReal_[idx];
-                            const float im = tdse3dImag_[idx];
-                            tdse3dNextReal_[idx] = re + dt * (-0.5f * lapI + V * im);
-                            tdse3dNextImag_[idx] = im + dt * ( 0.5f * lapR - V * re);
-                        }
-                    }
-                }
+                cp.draw(computeEuler_, wg, wg, wg);
             } else {
-                // Crank-Nicolson with fixed-point iterations
-                // 1) Build RHS from old psi
-                for (int iz = 1; iz < N-1; ++iz) {
-                    for (int iy = 1; iy < N-1; ++iy) {
-                        for (int ix = 1; ix < N-1; ++ix) {
-                            const int idx = iz*N2 + iy*N + ix;
-                            const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
-                            const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
-                            const float V = tdse3dPot_[idx];
-                            const float re = tdse3dReal_[idx];
-                            const float im = tdse3dImag_[idx];
-                            tdse3dRhsReal_[idx] = re + 0.5f * dt * (-0.5f * lapI + V * im);
-                            tdse3dRhsImag_[idx] = im + 0.5f * dt * ( 0.5f * lapR - V * re);
-                        }
-                    }
-                }
-                // 2) Fixed-point iterations (initial guess = old psi)
+                cp.draw(computeCnRhs_, wg, wg, wg);
                 for (int iter = 0; iter < CN_ITERS; ++iter) {
-                    for (int iz = 1; iz < N-1; ++iz) {
-                        for (int iy = 1; iy < N-1; ++iy) {
-                            for (int ix = 1; ix < N-1; ++ix) {
-                                const int idx = iz*N2 + iy*N + ix;
-                                const float lapR = laplacian(tdse3dReal_, ix, iy, iz);
-                                const float lapI = laplacian(tdse3dImag_, ix, iy, iz);
-                                const float V = tdse3dPot_[idx];
-                                const float re = tdse3dReal_[idx];
-                                const float im = tdse3dImag_[idx];
-                                tdse3dNextReal_[idx] = tdse3dRhsReal_[idx] + 0.5f * dt * (-0.5f * lapI + V * im);
-                                tdse3dNextImag_[idx] = tdse3dRhsImag_[idx] + 0.5f * dt * ( 0.5f * lapR - V * re);
-                            }
-                        }
-                    }
-                    if (iter < CN_ITERS - 1) {
-                        tdse3dReal_.swap(tdse3dNextReal_);
-                        tdse3dImag_.swap(tdse3dNextImag_);
-                    }
+                    cp.draw(computeCnIter_, wg, wg, wg);
                 }
+                cp.draw(computeCnFinish_, wg, wg, wg);
             }
-
-            // Zero Dirichlet boundary
-            for (int iz = 0; iz < N; ++iz) for (int iy = 0; iy < N; ++iy) {
-                tdse3dNextReal_[iz*N2+iy*N+0]   = 0.0f; tdse3dNextImag_[iz*N2+iy*N+0]   = 0.0f;
-                tdse3dNextReal_[iz*N2+iy*N+N-1] = 0.0f; tdse3dNextImag_[iz*N2+iy*N+N-1] = 0.0f;
-            }
-            for (int iz = 0; iz < N; ++iz) for (int ix = 0; ix < N; ++ix) {
-                tdse3dNextReal_[iz*N2+0*N+ix]   = 0.0f; tdse3dNextImag_[iz*N2+0*N+ix]   = 0.0f;
-                tdse3dNextReal_[iz*N2+(N-1)*N+ix] = 0.0f; tdse3dNextImag_[iz*N2+(N-1)*N+ix] = 0.0f;
-            }
-            for (int iy = 0; iy < N; ++iy) for (int ix = 0; ix < N; ++ix) {
-                tdse3dNextReal_[0*N2+iy*N+ix]   = 0.0f; tdse3dNextImag_[0*N2+iy*N+ix]   = 0.0f;
-                tdse3dNextReal_[(N-1)*N2+iy*N+ix] = 0.0f; tdse3dNextImag_[(N-1)*N2+iy*N+ix] = 0.0f;
-            }
-
-            applyAbsorb(tdse3dNextReal_, tdse3dNextImag_);
-
-            tdse3dReal_.swap(tdse3dNextReal_);
-            tdse3dImag_.swap(tdse3dNextImag_);
-            tdse3dTime_ += dt;
-        }
-
-        ++tdse3dNormCounter_;
-        if (tdse3dNormCounter_ >= 10) {
-            float norm = 0.0f;
-            for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
-                norm += tdse3dReal_[i]*tdse3dReal_[i] + tdse3dImag_[i]*tdse3dImag_[i];
-            }
-            if (norm > 1e-12f) {
-                const float inv = 1.0f / std::sqrt(norm);
-                for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
-                    tdse3dReal_[i] *= inv;
-                    tdse3dImag_[i] *= inv;
-                }
-            }
-            tdse3dNormCounter_ = 0;
+            std::swap(gpuWaveA_, gpuWaveB_);
+            tdse3dTime_ += gpuComputeParams_.dt;
         }
     }
 
-    void upload3dField() {
-        if (!tdseStorage3d_ || tdse3dUpload_.empty() || tdse3dPot_.empty()) { return; }
 
-        float maxPot = 0.0f;
-        for (float v : tdse3dPot_) { maxPot = std::max(maxPot, std::abs(v)); }
-        const float invMaxPot = (maxPot > 1e-6f) ? (1.0f / maxPot) : 0.0f;
+    void step3dSimulation() { /* replaced by dispatchCompute */ }
 
-        const size_t total = tdse3dReal_.size();
-        for (size_t i = 0; i < total; ++i) {
-            const float re = tdse3dReal_[i];
-            const float im = tdse3dImag_[i];
-            const float rho = re*re + im*im;
-            float phase01 = std::atan2(im, re) / (2.0f * kPi);
-            if (phase01 < 0.0f) { phase01 += 1.0f; }
-            const float pot01 = 0.5f + 0.5f * tdse3dPot_[i] * invMaxPot;
-            const size_t base = i * 4;
-            tdse3dUpload_[base + 0] = rho;
-            tdse3dUpload_[base + 1] = phase01;
-            tdse3dUpload_[base + 2] = pot01;
-            tdse3dUpload_[base + 3] = 1.0f;
-        }
-        pipeline3d_->uniforms.updateStorageBuffer(tdseStorage3d_, tdse3dUpload_.data(), tdse3dUpload_.size() * sizeof(float));
-    }
+    void upload3dField() { /* no-op: GPU writes directly to waveB render buffer */ }
+
+    // Kept for reference — no longer called:
+
 
     void render3d(float dt) {
-        step3dSimulation();
-        upload3dField();
-
+        // Simulation is now dispatched via dispatchCompute3d() BEFORE the render pass.
+        // Here we only update camera + render uniforms.
         int width = 1280, height = 720;
         SDL_GetWindowSize(Context::Instance().window, &width, &height);
         const float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
 
         ImGuiIO& io = ImGui::GetIO();
         const float wheel = Context::Instance().consumeWheelDelta();
-        camera_.process(dt, !io.WantCaptureMouse, wheel);
+        camera3d_.zoomSpeed = std::max(tdse3dDomainHalf_ * 0.05f, 0.5f);
+        camera3d_.process(dt, !io.WantCaptureMouse, wheel);
 
-        const glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.1f, 2000.0f);
-        const glm::mat4 view = glm::lookAt(camera_.position(), camera_.target, glm::vec3(0, 1, 0));
+        const float nearPlane = std::max(tdse3dDomainHalf_ * 0.01f, 0.01f);
+        const float farPlane  = tdse3dDomainHalf_ * 20.0f;
+        const glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, nearPlane, farPlane);
+        const glm::mat4 view = glm::lookAt(camera3d_.position(), camera3d_.target, glm::vec3(0, 1, 0));
         const glm::mat4 vp   = proj * view;
         const glm::mat4 invVP = glm::inverse(vp);
 
         gpu3dState_.invViewProj = invVP;
-        const glm::vec3 cp = camera_.position();
+        const glm::vec3 cp = camera3d_.position();
         gpu3dState_.camPos  = glm::vec4(cp, tdse3dTime_);
         gpu3dState_.params  = glm::vec4(
             static_cast<float>(tdse3dGridSize_),
@@ -1182,6 +1211,7 @@ private:
         pipeline3d_->setIndexBuffer(ibo3d_.get());
         pipeline = pipeline3d_;
     }
+
 
     static float factorialIntCpu(int v) {
         if (v <= 1) {
