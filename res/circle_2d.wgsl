@@ -17,12 +17,6 @@ struct TwoDUniform {
 
 @group(0) @binding(0) var<uniform> u: TwoDUniform;
 
-struct WaveCell {
-    value: vec4f,
-};
-
-@group(0) @binding(1) var<storage, read> waveGrid: array<WaveCell>;
-
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
@@ -48,10 +42,6 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     let sliceZ = u.pan.z;
     let integrateDepth = u.pan.w > 0.5;
     let time = u.render.x;
-    let mode = u.render.w;
-    let gridSize = max(2, i32(round(u.tdse.x)));
-    let domainHalf = max(u.tdse.y, 0.001);
-    let showPotentialOverlay = u.tdse.z > 0.5;
 
     var uv = input.uv;
     uv.x *= aspect;
@@ -61,65 +51,35 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
     var bright = 0.0;
     var color = vec3f(0.0, 0.0, 0.0);
 
-    if (mode < 0.5) {
-        if (!integrateDepth) {
-            // Exact 2D slice through the same 3D analytic orbital field.
-            bright = intensityAt(vec3f(uv.x, uv.y, sliceZ), n, l, m, intensityScale, intensityRange);
-        } else {
-            var accum = 0.0;
-            var maxSample = 0.0;
-            let steps = 72;
-            let dz = (2.0 * thickness) / f32(steps);
-            var i = 0;
-            loop {
-                if (i >= steps) {
-                    break;
-                }
-                let z = sliceZ - thickness + (f32(i) + 0.5) * dz;
-                let p = vec3f(uv.x, uv.y, z);
-                let s = intensityAt(p, n, l, m, intensityScale, intensityRange);
-                accum += s;
-                maxSample = max(maxSample, s);
-                i += 1;
-            }
-            let integrated = accum / f32(steps);
-            bright = clamp(0.3 * maxSample + 1.5 * integrated, 0.0, 1.0);
-        }
-
-        let r = length(vec3f(uv.x, uv.y, 0.0));
-        let safeR = max(r, 0.02);
-        let safeSin = max(abs(sin(acos(clamp(0.0 / safeR, -1.0, 1.0)))), 0.08);
-        let omega = f32(m) / (safeR * safeSin);
-        color = mapColor(bright, colorMode, vec3f(uv.x, uv.y, 0.0), time * phaseSpeed, n, m, omega);
+    if (!integrateDepth) {
+        // Exact 2D slice through the same 3D analytic orbital field.
+        bright = intensityAt(vec3f(uv.x, uv.y, sliceZ), n, l, m, intensityScale, intensityRange);
     } else {
-        let nx = 0.5 * (uv.x / domainHalf + 1.0);
-        let ny = 0.5 * (uv.y / domainHalf + 1.0);
-        if (nx < 0.0 || nx > 1.0 || ny < 0.0 || ny > 1.0) {
-            return vec4f(0.01, 0.01, 0.02, 1.0);
+        var accum = 0.0;
+        var maxSample = 0.0;
+        let steps = 72;
+        let dz = (2.0 * thickness) / f32(steps);
+        var i = 0;
+        loop {
+            if (i >= steps) {
+                break;
+            }
+            let z = sliceZ - thickness + (f32(i) + 0.5) * dz;
+            let p = vec3f(uv.x, uv.y, z);
+            let s = intensityAt(p, n, l, m, intensityScale, intensityRange);
+            accum += s;
+            maxSample = max(maxSample, s);
+            i += 1;
         }
-
-        let ix = clamp(i32(floor(nx * f32(gridSize - 1))), 0, gridSize - 1);
-        let iy = clamp(i32(floor(ny * f32(gridSize - 1))), 0, gridSize - 1);
-        let idx = iy * gridSize + ix;
-        let cell = waveGrid[idx].value;
-        let rho = max(cell.x, 0.0);
-        let phase01 = fract(cell.y);
-        let potential01 = clamp(cell.z, 0.0, 1.0);
-
-        let scaled = rho * max(intensityScale * 120.0, 0.0001);
-        bright = clamp(scaled / (scaled + intensityRange), 0.0, 1.0);
-
-        if (colorMode == 10 || colorMode == 9) {
-            color = hsvToRgb(phase01, 0.92, 0.20 + 0.80 * bright);
-        } else {
-            color = mapColor(bright, colorMode, vec3f(uv.x, uv.y, 0.0), time * phaseSpeed, n, m, 1.0);
-        }
-
-        if (showPotentialOverlay) {
-            let potColor = mix(vec3f(0.15, 0.45, 0.95), vec3f(0.95, 0.25, 0.10), potential01);
-            color = mix(color, potColor, 0.32 * (0.25 + 0.75 * potential01));
-        }
+        let integrated = accum / f32(steps);
+        bright = clamp(0.3 * maxSample + 1.5 * integrated, 0.0, 1.0);
     }
+
+    let r = length(vec3f(uv.x, uv.y, 0.0));
+    let safeR = max(r, 0.02);
+    let safeSin = max(abs(sin(acos(clamp(0.0 / safeR, -1.0, 1.0)))), 0.08);
+    let omega = f32(m) / (safeR * safeSin);
+    color = mapColor(bright, colorMode, vec3f(uv.x, uv.y, 0.0), time * phaseSpeed, n, m, omega);
 
     let bg = vec3f(0.01, 0.01, 0.02);
 

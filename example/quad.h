@@ -656,6 +656,7 @@ private:
     wgfx::Uniform* tdseStorage_ = nullptr;
     wgfx::Pipeline* pipelineOrbital_ = nullptr;
     wgfx::Pipeline* pipeline2d_ = nullptr;
+    wgfx::Pipeline* pipelineTdse2d_ = nullptr;
 
     std::unique_ptr<wgfx::VertexBuffer> vbo3d_;
     std::unique_ptr<wgfx::IndexBuffer> ibo3d_;
@@ -851,6 +852,14 @@ private:
         pipeline2d_->useDepth = false;
         init2dBuffers();
         pipeline2d_->init(vbo2d_.get());
+
+        // Load TDSE 2D pipeline for time-dependent simulations
+        pipelineTdse2d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "tdse2d.wgsl").c_str()));
+        pipelineTdse2d_->setUniform(stateUniform2d_);  // Share same uniform as pipeline2d_
+        pipelineTdse2d_->uniforms.setStorage(tdseStorage_);
+        pipelineTdse2d_->targets = 1;
+        pipelineTdse2d_->useDepth = false;
+        pipelineTdse2d_->init(vbo2d_.get());
 
         pipeline3d_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "tdse3d.wgsl").c_str()));
         stateUniform3d_ = wgfx::createUniform(0, sizeof(Gpu3dState), reinterpret_cast<const float*>(&gpu3dState_));
@@ -1619,17 +1628,20 @@ void stepTdseSimulation() {
             std::max(intensityRange_, 0.001f),
             std::max(twoDZoom_, 1e-6f),
             std::max(twoDThickness_, 0.01f));
-        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(twoDPhaseSpeed_, 0.0f), twoDUseTdse_ ? 1.0f : 0.0f);
+        gpu2dState_.render = glm::vec4(twoDTime_, aspect, std::max(twoDPhaseSpeed_, 0.0f), 0.0f);
         gpu2dState_.pan = glm::vec4(twoDPan_.x, twoDPan_.y, twoDSliceZ_, twoDIntegrateDepth_ ? 1.0f : 0.0f);
         gpu2dState_.tdse = glm::vec4(
             static_cast<float>(tdseGridSize_),
             std::max(tdseDomainHalfExtent_, 1.0f),
             tdseOverlayPotential_ ? 1.0f : 0.0f,
             0.0f);
-        pipeline2d_->updateUniform(stateUniform2d_, reinterpret_cast<const float*>(&gpu2dState_));
-        pipeline2d_->setVertexBuffer(vbo2d_.get());
-        pipeline2d_->setIndexBuffer(ibo2d_.get());
-        pipeline = pipeline2d_;
+
+        // Choose pipeline based on mode
+        wgfx::Pipeline* activePipeline = twoDUseTdse_ ? pipelineTdse2d_ : pipeline2d_;
+        activePipeline->updateUniform(stateUniform2d_, reinterpret_cast<const float*>(&gpu2dState_));
+        activePipeline->setVertexBuffer(vbo2d_.get());
+        activePipeline->setIndexBuffer(ibo2d_.get());
+        pipeline = activePipeline;
     }
 
     void process2dNavigation(int width, int height, float aspect, float dt) {
