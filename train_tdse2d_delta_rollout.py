@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import glob
+import math
 import os
 import random
 from dataclasses import dataclass
@@ -47,6 +48,24 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-samples", type=int, default=0)
 
     p.add_argument("--base-channels", type=int, default=32)
+    p.add_argument(
+        "--fourier-levels",
+        type=int,
+        default=0,
+        help="If >0, append Fourier coordinate features [x,y,sin/cos(2^l*w*x),sin/cos(2^l*w*y)]",
+    )
+    p.add_argument(
+        "--fourier-base-freq",
+        type=float,
+        default=math.pi,
+        help="Base angular frequency w for Fourier coordinate features",
+    )
+    p.add_argument(
+        "--fourier-level-amp-decay",
+        type=float,
+        default=0.7,
+        help="Per-level amplitude decay for Fourier features; <1.0 reduces high-frequency aggressiveness",
+    )
     p.add_argument("--rollout-steps", type=int, default=8, help="Training rollout horizon (<= dataset sequence_steps)")
     p.add_argument(
         "--rollout-curriculum-start",
@@ -68,7 +87,26 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--physics-loss-weight", type=float, default=0.1, help="Weight for norm conservation penalty")
     p.add_argument("--renorm-each-step", action="store_true", help="Re-normalize psi after each predicted step")
+    p.add_argument(
+        "--random-start-prob",
+        type=float,
+        default=1.0,
+        help="Probability of starting each training rollout from a random sequence time index",
+    )
+    p.add_argument(
+        "--state-noise-std",
+        type=float,
+        default=0.003,
+        help="Gaussian noise std injected into current state during training rollout (0 disables)",
+    )
+    p.add_argument(
+        "--state-noise-decay-epochs",
+        type=int,
+        default=20,
+        help="If >0, linearly decay state noise to 0 over this many epochs",
+    )
     p.add_argument("--device", type=str, default="cpu")
+    p.add_argument("--resume-checkpoint", type=str, default="", help="Resume training from checkpoint path")
 
     p.add_argument("--export-torchscript", action="store_true")
     p.add_argument("--torchscript-name", type=str, default="tdse2d_delta_torchscript.pt")
@@ -107,6 +145,50 @@ def load_dataset_meta(data_dir: str, fallback_grid: int, fallback_steps: int) ->
         seq_steps = int(meta.get("sequence_steps", fallback_steps))
         return DatasetMeta(grid_size=grid_size, dx=dx, sequence_steps=seq_steps)
     return DatasetMeta(grid_size=fallback_grid, dx=1.0 / max(1, fallback_grid), sequence_steps=fallback_steps)
+
+
+def fourier_feature_channels(fourier_levels: int) -> int:
+    levels = max(0, int(fourier_levels))
+    if levels <= 0:
+        return 0
+    return 2 + 4 * levels
+
+
+def build_fourier_coord_features(
+    batch_size: int,
+    n: int,
+    levels: int,
+    base_freq: float,
+    device: torch.device,
+    dtype: torch.dtype,
+    level_amp_decay: float = 1.0,
+) -> torch.Tensor | None:
+    levels = max(0, int(levels))
+    if levels <= 0:
+        return None
+
+    if n <= 1:
+        coord = torch.zeros((n,), device=device, dtype=dtype)
+    else:
+        coord = torch.linspace(-1.0, 1.0, steps=n, device=device, dtype=dtype)
+    x, y = torch.meshgrid(coord, coord, indexing="ij")
+
+    x = x.unsqueeze(0).unsqueeze(0)
+    y = y.unsqueeze(0).unsqueeze(0)
+    feats = [x, y]
+
+    w0 = float(base_freq)
+    amp_decay = float(level_amp_decay)
+    for l in range(levels):
+        w = (2.0 ** float(l)) * w0
+        amp = amp_decay ** float(l)
+        feats.append(amp * torch.sin(w * x))
+        feats.append(amp * torch.cos(w * x))
+        feats.append(amp * torch.sin(w * y))
+        feats.append(amp * torch.cos(w * y))
+
+    f = torch.cat(feats, dim=1)
+    return f.expand(batch_size, -1, -1, -1)
 
 
 def split_paths(paths: List[str], val_split: float) -> Tuple[List[str], List[str]]:
@@ -185,26 +267,54 @@ def rollout_loss(
     dx: float,
     renorm_each_step: bool,
     horizon_loss_power: float,
+    fourier_levels: int,
+    fourier_base_freq: float,
+    fourier_level_amp_decay: float,
+    random_start: bool,
+    state_noise_std: float,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # potential: [B,N,N], psi_seq: [B,T+1,2,N,N]
     b, t_plus_1, _, n, _ = psi_seq.shape
-    max_steps = min(rollout_steps, t_plus_1 - 1)
+    seq_steps = t_plus_1 - 1
+    max_steps = min(rollout_steps, seq_steps)
+    start_idx_max = max(0, seq_steps - max_steps)
+    if random_start and start_idx_max > 0:
+        start_idx = int(torch.randint(0, start_idx_max + 1, (1,), device=psi_seq.device).item())
+    else:
+        start_idx = 0
 
-    psi_cur = psi_seq[:, 0]  # [B,2,N,N]
+    psi_cur = psi_seq[:, start_idx]  # [B,2,N,N]
     total_data = psi_cur.new_tensor(0.0)
     total_phys = psi_cur.new_tensor(0.0)
     weight_sum = psi_cur.new_tensor(0.0)
+    coord_feats = build_fourier_coord_features(
+        batch_size=b,
+        n=n,
+        levels=fourier_levels,
+        base_freq=fourier_base_freq,
+        level_amp_decay=fourier_level_amp_decay,
+        device=psi_seq.device,
+        dtype=psi_seq.dtype,
+    )
 
     for t in range(max_steps):
         w_scalar = ((float(t + 1) / float(max_steps)) ** max(0.0, float(horizon_loss_power))) if max_steps > 0 else 1.0
         w = psi_cur.new_tensor(w_scalar)
-        inp = torch.cat([potential.unsqueeze(1), psi_cur], dim=1)  # [B,3,N,N]
+        if state_noise_std > 0:
+            psi_in = psi_cur + (float(state_noise_std) * torch.randn_like(psi_cur))
+            psi_in = renormalize_psi(psi_in, dx)
+        else:
+            psi_in = psi_cur
+
+        inp = torch.cat([potential.unsqueeze(1), psi_in], dim=1)  # [B,3,N,N]
+        if coord_feats is not None:
+            inp = torch.cat([inp, coord_feats], dim=1)
         delta = model(inp)
-        psi_next = psi_cur + delta
+        psi_next = psi_in + delta
         if renorm_each_step:
             psi_next = renormalize_psi(psi_next, dx)
 
-        gt_next = psi_seq[:, t + 1]
+        gt_next = psi_seq[:, start_idx + t + 1]
         total_data = total_data + w * mse_loss(psi_next, gt_next)
 
         if physics_weight > 0:
@@ -237,6 +347,9 @@ def evaluate(
     dx: float,
     renorm_each_step: bool,
     horizon_loss_power: float,
+    fourier_levels: int,
+    fourier_base_freq: float,
+    fourier_level_amp_decay: float,
     device: torch.device,
 ) -> Tuple[float, float, float]:
     model.eval()
@@ -259,6 +372,11 @@ def evaluate(
                 dx=dx,
                 renorm_each_step=renorm_each_step,
                 horizon_loss_power=horizon_loss_power,
+                fourier_levels=fourier_levels,
+                fourier_base_freq=fourier_base_freq,
+                fourier_level_amp_decay=fourier_level_amp_decay,
+                random_start=False,
+                state_noise_std=0.0,
             )
             b = potential.shape[0]
             total += float(loss.item()) * b
@@ -291,7 +409,8 @@ class DeltaStepWrapper(nn.Module):
 def export_to_torchscript(model: nn.Module, out_path: str, grid_size: int, device: torch.device, dx: float, renorm_each_step: bool) -> None:
     model.eval()
     wrapper = DeltaStepWrapper(model, dx=dx, renorm_each_step=renorm_each_step).to(device).eval()
-    dummy = torch.randn(1, 3, grid_size, grid_size, device=device)
+    in_ch = int(model.enc1.net[0].in_channels)
+    dummy = torch.randn(1, in_ch, grid_size, grid_size, device=device)
     print("TorchScript export 0%: tracing", flush=True)
     with torch.no_grad():
         traced = torch.jit.trace(wrapper, (dummy,), strict=False)
@@ -337,16 +456,49 @@ def main() -> None:
     rollout_steps = min(int(args.rollout_steps), int(meta.sequence_steps))
     curriculum_start = max(1, min(int(args.rollout_curriculum_start), rollout_steps))
     curriculum_epochs = max(0, int(args.rollout_curriculum_epochs))
+    if args.fourier_levels < 0:
+        raise RuntimeError("--fourier-levels must be >= 0")
+    if args.fourier_level_amp_decay <= 0:
+        raise RuntimeError("--fourier-level-amp-decay must be > 0")
+    if args.random_start_prob < 0 or args.random_start_prob > 1:
+        raise RuntimeError("--random-start-prob must be in [0,1]")
+    if args.state_noise_std < 0:
+        raise RuntimeError("--state-noise-std must be >= 0")
+    if args.state_noise_decay_epochs < 0:
+        raise RuntimeError("--state-noise-decay-epochs must be >= 0")
+    in_ch = 3 + fourier_feature_channels(args.fourier_levels)
 
-    model = DeltaUNet2D(in_ch=3, out_ch=2, base=args.base_channels).to(device)
+    model = DeltaUNet2D(in_ch=in_ch, out_ch=2, base=args.base_channels).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs))
     mse_loss = nn.MSELoss()
 
     best_val = float("inf")
     best_ckpt_path = os.path.join(args.output_dir, "best_tdse2d_delta.pt")
+    start_epoch = 1
 
-    for epoch in range(1, args.epochs + 1):
+    if args.resume_checkpoint:
+        resume = torch.load(args.resume_checkpoint, map_location="cpu", weights_only=False)
+        model.load_state_dict(resume["model_state_dict"], strict=True)
+        if "optimizer_state_dict" in resume:
+            optimizer.load_state_dict(resume["optimizer_state_dict"])
+        if "scheduler_state_dict" in resume:
+            scheduler.load_state_dict(resume["scheduler_state_dict"])
+        best_val = float(resume.get("best_val_total", best_val))
+        last_epoch = int(resume.get("epoch", 0))
+        start_epoch = last_epoch + 1
+        print(
+            f"Resumed from {args.resume_checkpoint} (last_epoch={last_epoch}, best_val={best_val:.6e})",
+            flush=True,
+        )
+        if start_epoch > args.epochs:
+            print(
+                f"Nothing to do: start_epoch={start_epoch} exceeds --epochs={args.epochs}. Increase --epochs to continue.",
+                flush=True,
+            )
+            return
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         running_total = 0.0
         running_data = 0.0
@@ -362,8 +514,14 @@ def main() -> None:
             current_rollout_steps = rollout_steps
         current_rollout_steps = max(1, min(current_rollout_steps, rollout_steps))
 
+        if args.state_noise_decay_epochs > 0:
+            noise_frac = max(0.0, 1.0 - float(epoch - 1) / float(args.state_noise_decay_epochs))
+            current_state_noise_std = float(args.state_noise_std) * noise_frac
+        else:
+            current_state_noise_std = float(args.state_noise_std)
+
         print(
-            f"Epoch {epoch}/{args.epochs} 0% (rollout_steps={current_rollout_steps}, horizon_power={args.horizon_loss_power:.2f})",
+            f"Epoch {epoch}/{args.epochs} 0% (rollout_steps={current_rollout_steps}, horizon_power={args.horizon_loss_power:.2f}, noise_std={current_state_noise_std:.2e})",
             flush=True,
         )
 
@@ -381,6 +539,11 @@ def main() -> None:
                 dx=meta.dx,
                 renorm_each_step=args.renorm_each_step,
                 horizon_loss_power=args.horizon_loss_power,
+                fourier_levels=args.fourier_levels,
+                fourier_base_freq=args.fourier_base_freq,
+                fourier_level_amp_decay=args.fourier_level_amp_decay,
+                random_start=(random.random() < float(args.random_start_prob)),
+                state_noise_std=current_state_noise_std,
             )
 
             optimizer.zero_grad(set_to_none=True)
@@ -412,6 +575,9 @@ def main() -> None:
             dx=meta.dx,
             renorm_each_step=args.renorm_each_step,
             horizon_loss_power=args.horizon_loss_power,
+            fourier_levels=args.fourier_levels,
+            fourier_base_freq=args.fourier_base_freq,
+            fourier_level_amp_decay=args.fourier_level_amp_decay,
             device=device,
         )
 
@@ -427,6 +593,7 @@ def main() -> None:
                 {
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
                     "args": vars(args),
                     "dataset_meta": {
                         "grid_size": meta.grid_size,

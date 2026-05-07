@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from train_tdse2d_delta_rollout import DeltaUNet2D, renormalize_psi
+from train_tdse2d_delta_rollout import DeltaUNet2D, build_fourier_coord_features, renormalize_psi
 
 
 def parse_args() -> argparse.Namespace:
@@ -92,14 +92,39 @@ def main() -> None:
     model_args = ckpt.get("args", {})
     base_channels = int(model_args.get("base_channels", 32))
     renorm_each_step = bool(model_args.get("renorm_each_step", False))
+    fourier_base_freq = float(model_args.get("fourier_base_freq", np.pi))
+    fourier_level_amp_decay = float(model_args.get("fourier_level_amp_decay", 1.0))
     dx = float(ckpt.get("dataset_meta", {}).get("dx", 1.0 / max(1, int(potential.shape[-1]))))
 
-    model = DeltaUNet2D(in_ch=3, out_ch=2, base=base_channels).to(device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    state_dict = ckpt["model_state_dict"]
+    model_in_ch = int(state_dict["enc1.net.0.weight"].shape[1])
+    if model_in_ch < 3:
+        raise RuntimeError(f"Invalid checkpoint input channels: {model_in_ch}")
+    extra_in = model_in_ch - 3
+    if extra_in == 0:
+        fourier_levels = 0
+    elif extra_in >= 2 and ((extra_in - 2) % 4 == 0):
+        fourier_levels = int((extra_in - 2) // 4)
+    else:
+        raise RuntimeError(
+            f"Unsupported checkpoint input channels={model_in_ch}; cannot infer Fourier feature layout"
+        )
+
+    model = DeltaUNet2D(in_ch=model_in_ch, out_ch=2, base=base_channels).to(device)
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     psi0 = psi_seq[0].to(device)
     potential_b = potential.unsqueeze(0).to(device)
+    coord_feats_1b = build_fourier_coord_features(
+        batch_size=1,
+        n=int(potential.shape[-1]),
+        levels=fourier_levels,
+        base_freq=fourier_base_freq,
+        device=device,
+        dtype=psi0.dtype,
+        level_amp_decay=fourier_level_amp_decay,
+    )
     model_grid_n = int(potential.shape[-1])
 
     steps = min(max(1, int(args.rollout_steps)), max(1, seq_steps))
@@ -109,6 +134,8 @@ def main() -> None:
         cur = psi0.unsqueeze(0)
         for _ in range(steps):
             inp = torch.cat([potential_b.unsqueeze(1), cur], dim=1)
+            if coord_feats_1b is not None:
+                inp = torch.cat([inp, coord_feats_1b], dim=1)
             delta = model(inp)
             nxt = cur + delta
             if renorm_each_step:
@@ -162,6 +189,8 @@ def main() -> None:
             nxt = live_state["cur"]
             for _ in range(model_substeps):
                 inp = torch.cat([potential_b.unsqueeze(1), nxt], dim=1)
+                if coord_feats_1b is not None:
+                    inp = torch.cat([inp, coord_feats_1b], dim=1)
                 delta = model(inp)
                 nxt = nxt + delta
                 if renorm_each_step:

@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from train_tdse2d_delta_rollout import DeltaUNet2D, renormalize_psi
+from train_tdse2d_delta_rollout import DeltaUNet2D, build_fourier_coord_features, renormalize_psi
 
 
 def parse_args() -> argparse.Namespace:
@@ -273,7 +273,23 @@ def main() -> None:
     model_args = ckpt.get("args", {})
     base_channels = int(model_args.get("base_channels", 32))
     renorm_each_step = bool(model_args.get("renorm_each_step", False))
+    fourier_base_freq = float(model_args.get("fourier_base_freq", np.pi))
+    fourier_level_amp_decay = float(model_args.get("fourier_level_amp_decay", 1.0))
     dx = float(ckpt.get("dataset_meta", {}).get("dx", 1.0 / max(1, int(potential.shape[-1]))))
+
+    state_dict = ckpt["model_state_dict"]
+    model_in_ch = int(state_dict["enc1.net.0.weight"].shape[1])
+    if model_in_ch < 3:
+        raise RuntimeError(f"Invalid checkpoint input channels: {model_in_ch}")
+    extra_in = model_in_ch - 3
+    if extra_in == 0:
+        fourier_levels = 0
+    elif extra_in >= 2 and ((extra_in - 2) % 4 == 0):
+        fourier_levels = int((extra_in - 2) // 4)
+    else:
+        raise RuntimeError(
+            f"Unsupported checkpoint input channels={model_in_ch}; cannot infer Fourier feature layout"
+        )
 
     dataset_meta_path = os.path.join(args.data_dir, "dataset_meta.pt")
     dataset_meta = {}
@@ -301,8 +317,8 @@ def main() -> None:
             device=torch.device("cpu"),
         ).cpu()
 
-    model = DeltaUNet2D(in_ch=3, out_ch=2, base=base_channels).to(device)
-    model.load_state_dict(ckpt["model_state_dict"], strict=True)
+    model = DeltaUNet2D(in_ch=model_in_ch, out_ch=2, base=base_channels).to(device)
+    model.load_state_dict(state_dict, strict=True)
     model.eval()
 
     steps = min(args.rollout_steps, seq_steps)
@@ -321,12 +337,23 @@ def main() -> None:
 
     psi0 = psi_seq[0].to(device)
     potential_b = potential.unsqueeze(0).to(device)
+    coord_feats_1b = build_fourier_coord_features(
+        batch_size=1,
+        n=int(potential.shape[-1]),
+        levels=fourier_levels,
+        base_freq=fourier_base_freq,
+        device=device,
+        dtype=psi0.dtype,
+        level_amp_decay=fourier_level_amp_decay,
+    )
 
     preds = []
     with torch.no_grad():
         cur = psi0.unsqueeze(0)  # [1,2,N,N]
         for _ in range(steps):
             inp = torch.cat([potential_b.unsqueeze(1), cur], dim=1)  # [1,3,N,N]
+            if coord_feats_1b is not None:
+                inp = torch.cat([inp, coord_feats_1b], dim=1)
             delta = model(inp)
             nxt = cur + delta
             if renorm_each_step:
@@ -384,12 +411,15 @@ def main() -> None:
     im2 = axs[2].imshow(pr0_disp, cmap=args.density_cmap, vmin=0.0, vmax=1.0)
     axs[2].set_title(f"Model Rollout |psi|^2 (N={model_grid_n})")
 
-    err0 = np.zeros_like(rho_pred[0]) if (args.no_error_motion or args.model_only) else np.abs(rho_pred[0] - rho_gt[0])
-    im3 = axs[3].imshow(err0, cmap=args.error_cmap)
-    if args.model_only:
-        axs[3].set_title("Error panel disabled (model-only)")
-    else:
-        axs[3].set_title("|Model - Ground Truth| density" if not args.no_error_motion else "Error panel disabled")
+    axs[3].set_title("Error vs step")
+    axs[3].set_xlabel("step")
+    axs[3].set_ylabel("error")
+    axs[3].grid(True, alpha=0.25)
+    line_mae, = axs[3].plot([], [], lw=1.8, label="mean|rho_pred-rho_gt|")
+    line_rel, = axs[3].plot([], [], lw=1.8, label="relL2(rho)")
+    axs[3].legend(loc="upper right", fontsize=8)
+    axs[3].set_xlim(1, max(2, steps))
+    axs[3].set_ylim(0.0, 1.0)
 
     im4 = axs[4].imshow(rho_motion[0], cmap=args.motion_cmap)
     if args.model_only:
@@ -397,13 +427,17 @@ def main() -> None:
     else:
         axs[4].set_title("|rho_t - rho_{t-1}|" if not args.no_error_motion else "Motion panel disabled")
 
-    for a in axs:
+    for idx, a in enumerate(axs):
+        if idx == 3:
+            continue
         a.set_xticks([])
         a.set_yticks([])
 
     title = fig.suptitle("", fontsize=11)
     fps_state = {"last_t": None, "ema": 0.0}
     metric_state = {"rel": 0.0, "gt_mo": 0.0}
+    err_hist = []
+    rel_hist = []
 
     def tick_fps() -> float:
         now = time.perf_counter()
@@ -423,10 +457,11 @@ def main() -> None:
         gt = rho_gt[frame_idx]
         pr = rho_pred[frame_idx]
         if args.no_error_motion or args.model_only:
-            er = err0
+            er_mae = 0.0
             mo = rho_motion[frame_idx]
         else:
             er = np.abs(pr - gt)
+            er_mae = float(er.mean())
             mo = rho_motion[frame_idx]
 
         gt_disp = normalize_density_display(
@@ -437,16 +472,22 @@ def main() -> None:
         )
         im1.set_data(gt_disp)
         im2.set_data(pr_disp)
-        im3.set_data(er)
         im4.set_data(mo)
 
         if (not args.no_error_motion) and (not args.model_only):
-            im3.set_clim(0.0, max(1e-8, float(er.max())))
             im4.set_clim(0.0, max(1e-10, float(mo.max())))
 
         if (not args.model_only) and (frame_idx % args.metrics_every == 0):
             metric_state["rel"] = float(np.linalg.norm(pr - gt) / max(1e-12, np.linalg.norm(gt)))
         rel = metric_state["rel"]
+        err_hist.append(er_mae)
+        rel_hist.append(rel)
+        x = np.arange(1, len(err_hist) + 1)
+        line_mae.set_data(x, np.asarray(err_hist))
+        line_rel.set_data(x, np.asarray(rel_hist))
+        y_max = max(1e-8, float(np.max(np.concatenate([np.asarray(err_hist), np.asarray(rel_hist)]))))
+        axs[3].set_ylim(0.0, 1.15 * y_max)
+        axs[3].set_xlim(1, max(2, len(err_hist)))
         fps_now = tick_fps()
         title.set_text(
             f"sample={os.path.basename(sample_path)} frame={frame_idx + 1}/{steps} "
@@ -457,7 +498,7 @@ def main() -> None:
         else:
             axs[1].set_title(f"Ground Truth (SOFT) |psi|^2 (t+{frame_idx + 1})")
         axs[2].set_title(f"Model Rollout |psi|^2 (N={model_grid_n}, t+{frame_idx + 1})")
-        return im1, im2, im3, im4, title
+        return im1, im2, im4, line_mae, line_rel, title
 
     live_state = {
         "step": 0,
@@ -496,6 +537,8 @@ def main() -> None:
             nxt = live_state["cur"]
             for _ in range(model_substeps):
                 inp = torch.cat([potential_b.unsqueeze(1), nxt], dim=1)
+                if coord_feats_1b is not None:
+                    inp = torch.cat([inp, coord_feats_1b], dim=1)
                 delta = model(inp)
                 nxt = nxt + delta
                 if renorm_each_step:
@@ -533,10 +576,11 @@ def main() -> None:
             gt = gt_t.detach().cpu().numpy()
             gt_idx = min(live_state["step"], seq_steps - 1)
         if args.no_error_motion or args.model_only:
-            er = err0
+            er_mae = 0.0
             gt_mo = np.zeros_like(gt)
         else:
             er = np.abs(pr - gt)
+            er_mae = float(er.mean())
             gt_mo = np.abs(gt - live_state["prev_gt"])
             live_state["prev_gt"] = gt
 
@@ -548,10 +592,8 @@ def main() -> None:
         )
         im1.set_data(gt_disp)
         im2.set_data(pr_disp)
-        im3.set_data(er)
         im4.set_data(mo)
         if (not args.no_error_motion) and (not args.model_only):
-            im3.set_clim(0.0, max(1e-8, float(er.max())))
             im4.set_clim(0.0, max(1e-10, float(mo.max())))
 
         if (not args.model_only) and ((live_state["step"] % args.metrics_every) == 0):
@@ -559,6 +601,17 @@ def main() -> None:
             metric_state["gt_mo"] = float(gt_mo.mean()) if not args.no_error_motion else 0.0
         rel = metric_state["rel"]
         gt_mo_mean = metric_state["gt_mo"]
+        err_hist.append(er_mae)
+        rel_hist.append(rel)
+        x = np.arange(1, len(err_hist) + 1)
+        line_mae.set_data(x, np.asarray(err_hist))
+        line_rel.set_data(x, np.asarray(rel_hist))
+        y_max = max(1e-8, float(np.max(np.concatenate([np.asarray(err_hist), np.asarray(rel_hist)]))))
+        axs[3].set_ylim(0.0, 1.15 * y_max)
+        if len(err_hist) <= 300:
+            axs[3].set_xlim(1, max(2, len(err_hist)))
+        else:
+            axs[3].set_xlim(len(err_hist) - 299, len(err_hist))
         step_num = live_state["step"] + 1
         fps_now = tick_fps()
         title.set_text(
@@ -575,7 +628,7 @@ def main() -> None:
         axs[2].set_title(f"Model Rollout |psi|^2 (N={model_grid_n}, t+{step_num})")
 
         live_state["step"] += 1
-        return im1, im2, im3, im4, title
+        return im1, im2, im4, line_mae, line_rel, title
 
     if args.infinite_live:
         ani = animation.FuncAnimation(
