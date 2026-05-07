@@ -5,6 +5,8 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <random>
@@ -16,6 +18,14 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/packing.hpp>
 #include <glm/gtc/type_ptr.hpp>
+
+#ifdef ATOMS_ENABLE_ONNX
+#include <onnxruntime_cxx_api.h>
+#endif
+
+#ifdef ATOMS_ENABLE_TORCHSCRIPT
+#include <torch/script.h>
+#endif
 
 #include "context.h"
 #include "imgui.h"
@@ -281,6 +291,45 @@ public:
             }
             ImGui::SliderFloat("intensity scale##3d", &tdse3dIntensityScale_, 0.01f, 20.0f, "%.4f", ImGuiSliderFlags_Logarithmic);
             ImGui::SliderFloat("intensity range##3d", &tdse3dIntensityRange_, 0.01f, 4.0f,  "%.4f", ImGuiSliderFlags_Logarithmic);
+
+            ImGui::Separator();
+            ImGui::Text("ONNX rollout");
+#ifdef ATOMS_ENABLE_ONNX
+            ImGui::InputText("model path##onnx3d", tdse3dOnnxModelPath_, sizeof(tdse3dOnnxModelPath_));
+            if (ImGui::Button("Load ONNX model##3d")) {
+                loadOnnxModel3d(std::string(tdse3dOnnxModelPath_));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Run ONNX rollout##3d")) {
+                tdse3dOnnxRunRequested_ = true;
+                tdse3dUseOnnx_ = true;
+            }
+            ImGui::Checkbox("use ONNX mode##3d", &tdse3dUseOnnx_);
+            ImGui::TextWrapped("%s", tdse3dOnnxStatus_.c_str());
+#else
+            ImGui::TextWrapped("ONNX support is disabled. Reconfigure with -DATOMS_ENABLE_ONNX=ON and set ONNXRUNTIME_ROOT.");
+#endif
+
+            ImGui::Separator();
+            ImGui::Text("TorchScript rollout");
+#ifdef ATOMS_ENABLE_TORCHSCRIPT
+            ImGui::InputText("model path##torchscript3d", tdse3dTorchscriptModelPath_, sizeof(tdse3dTorchscriptModelPath_));
+            ImGui::Text("TorchScript expected grid: %d", tdse3dTorchscriptExpectedGrid_);
+            if (ImGui::Button("Load TorchScript model##3d")) {
+                loadTorchscriptModel3d(std::string(tdse3dTorchscriptModelPath_));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Run TorchScript rollout##3d")) {
+                tdse3dTorchscriptRunRequested_ = true;
+                tdse3dUseTorchscript_ = true;
+            }
+            ImGui::Checkbox("use TorchScript mode##3d", &tdse3dUseTorchscript_);
+            ImGui::Checkbox("autoplay TorchScript##3d", &tdse3dTorchscriptAutoplay_);
+            ImGui::SliderInt("TorchScript steps/frame##3d", &tdse3dTorchscriptStepsPerFrame_, 1, 8);
+            ImGui::TextWrapped("%s", tdse3dTorchscriptStatus_.c_str());
+#else
+            ImGui::TextWrapped("TorchScript support is disabled. Reconfigure with -DATOMS_ENABLE_TORCHSCRIPT=ON and set TORCH_ROOT.");
+#endif
 
             if (ImGui::Button("Reset 3D wavefunction")) {
                 tdse3dNeedsReset_ = true;
@@ -778,6 +827,36 @@ private:
     float tdse3dAbsorbStrength_ = 12.0f;
     float tdse3dTime_           = 0.0f;
 
+    bool tdse3dUseOnnx_          = false;
+    bool tdse3dOnnxLoaded_       = false;
+    bool tdse3dOnnxRunRequested_ = false;
+    char tdse3dOnnxModelPath_[512] = "./tdse_fno_runs_safe/tdse_fno3d.onnx";
+    std::string tdse3dOnnxStatus_ = "ONNX model not loaded";
+    std::vector<float> tdse3dOnnxInput_;
+
+#ifdef ATOMS_ENABLE_ONNX
+    std::unique_ptr<Ort::Env> onnxEnv_;
+    std::unique_ptr<Ort::SessionOptions> onnxSessionOptions_;
+    std::unique_ptr<Ort::Session> onnxSession_;
+    std::vector<std::string> onnxInputNamesStorage_;
+    std::vector<std::string> onnxOutputNamesStorage_;
+    std::vector<const char*> onnxInputNames_;
+    std::vector<const char*> onnxOutputNames_;
+#endif
+
+    bool tdse3dUseTorchscript_            = false;
+    bool tdse3dTorchscriptLoaded_         = false;
+    bool tdse3dTorchscriptRunRequested_   = false;
+    bool tdse3dTorchscriptAutoplay_       = true;
+    int tdse3dTorchscriptStepsPerFrame_   = 1;
+    int tdse3dTorchscriptExpectedGrid_    = 128;
+    char tdse3dTorchscriptModelPath_[512] = "/Users/ethan/code/atoms/tdse_fno_runs_safe/tdse_fno3d_torchscript.pt";
+    std::string tdse3dTorchscriptStatus_  = "TorchScript model not loaded";
+
+#ifdef ATOMS_ENABLE_TORCHSCRIPT
+    std::unique_ptr<torch::jit::script::Module> torchscriptModule_;
+#endif
+
     enum class Potential3dType : int {
         Free = 0,
         HarmonicWell = 1,
@@ -1097,14 +1176,277 @@ private:
             for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
                 packed[i] = glm::packHalf2x16(glm::vec2(tdse3dReal_[i], tdse3dImag_[i]));
             }
-            wgfx::queue.writeBuffer(gpuWaveA_->buffer, 0,
-                packed.data(), packed.size() * sizeof(uint32_t));
-            // Zero waveB so the render shader starts clean
-            std::vector<uint32_t> zeros(packed.size(), 0);
-            wgfx::queue.writeBuffer(gpuWaveB_->buffer, 0,
-                zeros.data(), zeros.size() * sizeof(uint32_t));
+            wgfx::queue.writeBuffer(gpuWaveA_->buffer, 0, packed.data(), packed.size() * sizeof(uint32_t));
+            wgfx::queue.writeBuffer(gpuWaveB_->buffer, 0, packed.data(), packed.size() * sizeof(uint32_t));
         }
     }
+
+    void upload3dWaveToGpu() {
+        if (!gpuWaveA_ || !gpuWaveB_ || tdse3dReal_.size() != tdse3dImag_.size()) {
+            return;
+        }
+        std::vector<uint32_t> packed(tdse3dReal_.size());
+        for (size_t i = 0; i < tdse3dReal_.size(); ++i) {
+            packed[i] = glm::packHalf2x16(glm::vec2(tdse3dReal_[i], tdse3dImag_[i]));
+        }
+        wgfx::queue.writeBuffer(gpuWaveA_->buffer, 0, packed.data(), packed.size() * sizeof(uint32_t));
+        wgfx::queue.writeBuffer(gpuWaveB_->buffer, 0, packed.data(), packed.size() * sizeof(uint32_t));
+    }
+
+#ifdef ATOMS_ENABLE_ONNX
+    bool loadOnnxModel3d(const std::string& modelPath) {
+        try {
+            if (modelPath.empty()) {
+                tdse3dOnnxStatus_ = "ONNX load failed: model path is empty";
+                tdse3dOnnxLoaded_ = false;
+                return false;
+            }
+
+            if (!std::filesystem::exists(modelPath)) {
+                tdse3dOnnxStatus_ = "ONNX load failed: file not found";
+                tdse3dOnnxLoaded_ = false;
+                return false;
+            }
+
+            if (!onnxEnv_) {
+                onnxEnv_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "atoms_tdse3d");
+            }
+
+            onnxSessionOptions_ = std::make_unique<Ort::SessionOptions>();
+            onnxSessionOptions_->SetIntraOpNumThreads(1);
+            onnxSessionOptions_->SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_EXTENDED);
+
+            onnxSession_ = std::make_unique<Ort::Session>(*onnxEnv_, modelPath.c_str(), *onnxSessionOptions_);
+
+            Ort::AllocatorWithDefaultOptions allocator;
+            const size_t inputCount = onnxSession_->GetInputCount();
+            const size_t outputCount = onnxSession_->GetOutputCount();
+
+            onnxInputNamesStorage_.clear();
+            onnxOutputNamesStorage_.clear();
+            onnxInputNames_.clear();
+            onnxOutputNames_.clear();
+
+            for (size_t i = 0; i < inputCount; ++i) {
+                auto name = onnxSession_->GetInputNameAllocated(i, allocator);
+                onnxInputNamesStorage_.push_back(name.get() ? name.get() : "");
+            }
+            for (size_t i = 0; i < outputCount; ++i) {
+                auto name = onnxSession_->GetOutputNameAllocated(i, allocator);
+                onnxOutputNamesStorage_.push_back(name.get() ? name.get() : "");
+            }
+            for (const std::string& n : onnxInputNamesStorage_) {
+                onnxInputNames_.push_back(n.c_str());
+            }
+            for (const std::string& n : onnxOutputNamesStorage_) {
+                onnxOutputNames_.push_back(n.c_str());
+            }
+
+            if (onnxInputNames_.empty() || onnxOutputNames_.empty()) {
+                tdse3dOnnxStatus_ = "ONNX load failed: model has no inputs or outputs";
+                tdse3dOnnxLoaded_ = false;
+                return false;
+            }
+
+            tdse3dOnnxLoaded_ = true;
+            tdse3dOnnxStatus_ = "ONNX model loaded";
+            return true;
+        } catch (const std::exception& e) {
+            tdse3dOnnxLoaded_ = false;
+            tdse3dOnnxStatus_ = std::string("ONNX load failed: ") + e.what();
+            return false;
+        }
+    }
+
+    bool runOnnxRollout3d() {
+        try {
+            if (!tdse3dOnnxLoaded_ || !onnxSession_) {
+                tdse3dOnnxStatus_ = "ONNX rollout skipped: no model loaded";
+                return false;
+            }
+
+            if (tdse3dPotDirty_) {
+                rebuild3dPotential();
+            }
+            if (tdse3dNeedsReset_) {
+                reset3dWavefunction();
+            }
+
+            const int N = tdse3dGridSize_;
+            const size_t cells = static_cast<size_t>(N) * static_cast<size_t>(N) * static_cast<size_t>(N);
+            if (cells == 0 || tdse3dPot_.size() != cells || tdse3dReal_.size() != cells || tdse3dImag_.size() != cells) {
+                tdse3dOnnxStatus_ = "ONNX rollout failed: invalid 3D buffer sizes";
+                return false;
+            }
+
+            tdse3dOnnxInput_.resize(cells * 3);
+            std::memcpy(tdse3dOnnxInput_.data() + 0 * cells, tdse3dPot_.data(),  cells * sizeof(float));
+            std::memcpy(tdse3dOnnxInput_.data() + 1 * cells, tdse3dReal_.data(), cells * sizeof(float));
+            std::memcpy(tdse3dOnnxInput_.data() + 2 * cells, tdse3dImag_.data(), cells * sizeof(float));
+
+            const std::array<int64_t, 5> inputShape = {1, 3, N, N, N};
+            Ort::MemoryInfo memoryInfo = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+            Ort::Value inputTensor = Ort::Value::CreateTensor<float>(
+                memoryInfo,
+                tdse3dOnnxInput_.data(),
+                tdse3dOnnxInput_.size(),
+                inputShape.data(),
+                inputShape.size());
+
+            std::vector<Ort::Value> outputs = onnxSession_->Run(
+                Ort::RunOptions{nullptr},
+                onnxInputNames_.data(),
+                &inputTensor,
+                1,
+                onnxOutputNames_.data(),
+                onnxOutputNames_.size());
+
+            if (outputs.empty() || !outputs[0].IsTensor()) {
+                tdse3dOnnxStatus_ = "ONNX rollout failed: no tensor output";
+                return false;
+            }
+
+            Ort::TensorTypeAndShapeInfo outInfo = outputs[0].GetTensorTypeAndShapeInfo();
+            std::vector<int64_t> outShape = outInfo.GetShape();
+            if (outShape.size() != 5 || outShape[1] != 2 || outShape[2] != N || outShape[3] != N || outShape[4] != N) {
+                tdse3dOnnxStatus_ = "ONNX rollout failed: output shape mismatch";
+                return false;
+            }
+
+            const float* outData = outputs[0].GetTensorData<float>();
+            if (!outData) {
+                tdse3dOnnxStatus_ = "ONNX rollout failed: null output data";
+                return false;
+            }
+
+            for (size_t i = 0; i < cells; ++i) {
+                tdse3dReal_[i] = outData[i];
+                tdse3dImag_[i] = outData[cells + i];
+            }
+            upload3dWaveToGpu();
+            tdse3dTime_ += std::max(tdse3dDt_, 0.0f);
+            tdse3dOnnxStatus_ = "ONNX rollout complete";
+            return true;
+        } catch (const std::exception& e) {
+            tdse3dOnnxStatus_ = std::string("ONNX rollout failed: ") + e.what();
+            return false;
+        }
+    }
+#else
+    bool loadOnnxModel3d(const std::string&) {
+        tdse3dOnnxLoaded_ = false;
+        tdse3dOnnxStatus_ = "ONNX support disabled at compile time";
+        return false;
+    }
+
+    bool runOnnxRollout3d() {
+        tdse3dOnnxStatus_ = "ONNX support disabled at compile time";
+        return false;
+    }
+#endif
+
+#ifdef ATOMS_ENABLE_TORCHSCRIPT
+    bool loadTorchscriptModel3d(const std::string& modelPath) {
+        try {
+            if (modelPath.empty()) {
+                tdse3dTorchscriptStatus_ = "TorchScript load failed: model path is empty";
+                tdse3dTorchscriptLoaded_ = false;
+                return false;
+            }
+            if (!std::filesystem::exists(modelPath)) {
+                tdse3dTorchscriptStatus_ = "TorchScript load failed: file not found";
+                tdse3dTorchscriptLoaded_ = false;
+                return false;
+            }
+
+            auto module = std::make_unique<torch::jit::script::Module>(torch::jit::load(modelPath));
+            module->eval();
+            torchscriptModule_ = std::move(module);
+
+            tdse3dTorchscriptLoaded_ = true;
+            tdse3dTorchscriptStatus_ = "TorchScript model loaded";
+            return true;
+        } catch (const std::exception& e) {
+            tdse3dTorchscriptLoaded_ = false;
+            tdse3dTorchscriptStatus_ = std::string("TorchScript load failed: ") + e.what();
+            return false;
+        }
+    }
+
+    bool runTorchscriptRollout3d() {
+        try {
+            if (!tdse3dTorchscriptLoaded_ || !torchscriptModule_) {
+                tdse3dTorchscriptStatus_ = "TorchScript rollout skipped: no model loaded";
+                return false;
+            }
+
+            if (tdse3dGridSize_ != tdse3dTorchscriptExpectedGrid_) {
+                tdse3dTorchscriptStatus_ =
+                    "TorchScript rollout blocked: grid mismatch. Set grid N to "
+                    + std::to_string(tdse3dTorchscriptExpectedGrid_) +
+                    " and reset 3D wavefunction.";
+                return false;
+            }
+
+            if (tdse3dPotDirty_) {
+                rebuild3dPotential();
+            }
+            if (tdse3dNeedsReset_) {
+                reset3dWavefunction();
+            }
+
+            const int N = tdse3dGridSize_;
+            const size_t cells = static_cast<size_t>(N) * static_cast<size_t>(N) * static_cast<size_t>(N);
+            if (cells == 0 || tdse3dPot_.size() != cells || tdse3dReal_.size() != cells || tdse3dImag_.size() != cells) {
+                tdse3dTorchscriptStatus_ = "TorchScript rollout failed: invalid 3D buffer sizes";
+                return false;
+            }
+
+            std::vector<float> inputData(cells * 3);
+            std::memcpy(inputData.data() + 0 * cells, tdse3dPot_.data(), cells * sizeof(float));
+            std::memcpy(inputData.data() + 1 * cells, tdse3dReal_.data(), cells * sizeof(float));
+            std::memcpy(inputData.data() + 2 * cells, tdse3dImag_.data(), cells * sizeof(float));
+
+            torch::NoGradGuard noGrad;
+            torch::Tensor input = torch::from_blob(inputData.data(), {1, 3, N, N, N}, torch::kFloat32).clone();
+            torch::Tensor output = torchscriptModule_->forward({input}).toTensor().to(torch::kCPU).contiguous();
+
+            if (output.dim() != 5 || output.size(0) != 1 || output.size(1) != 2 || output.size(2) != N || output.size(3) != N || output.size(4) != N) {
+                tdse3dTorchscriptStatus_ = "TorchScript rollout failed: output shape mismatch";
+                return false;
+            }
+
+            const float* outData = output.data_ptr<float>();
+            if (!outData) {
+                tdse3dTorchscriptStatus_ = "TorchScript rollout failed: null output data";
+                return false;
+            }
+
+            for (size_t i = 0; i < cells; ++i) {
+                tdse3dReal_[i] = outData[i];
+                tdse3dImag_[i] = outData[cells + i];
+            }
+            upload3dWaveToGpu();
+            tdse3dTime_ += std::max(tdse3dDt_, 0.0f);
+            tdse3dTorchscriptStatus_ = "TorchScript rollout complete";
+            return true;
+        } catch (const std::exception& e) {
+            tdse3dTorchscriptStatus_ = std::string("TorchScript rollout failed: ") + e.what();
+            return false;
+        }
+    }
+#else
+    bool loadTorchscriptModel3d(const std::string&) {
+        tdse3dTorchscriptLoaded_ = false;
+        tdse3dTorchscriptStatus_ = "TorchScript support disabled at compile time";
+        return false;
+    }
+
+    bool runTorchscriptRollout3d() {
+        tdse3dTorchscriptStatus_ = "TorchScript support disabled at compile time";
+        return false;
+    }
+#endif
 
     // Dispatch GPU compute for one FDTD substep.
     // Called by render3d(); the ComputePass is owned externally in main.cpp.
@@ -1114,6 +1456,32 @@ private:
     }
 
     void dispatchCompute(wgfx::ComputePass& cp) {
+        if (tdse3dUseTorchscript_) {
+            int steps = 0;
+            if (tdse3dTorchscriptAutoplay_) {
+                steps = std::clamp(tdse3dTorchscriptStepsPerFrame_, 1, 32);
+            }
+            if (tdse3dTorchscriptRunRequested_) {
+                steps = std::max(steps, 1);
+                tdse3dTorchscriptRunRequested_ = false;
+            }
+
+            for (int i = 0; i < steps; ++i) {
+                if (!runTorchscriptRollout3d()) {
+                    break;
+                }
+            }
+            return;
+        }
+
+        if (tdse3dUseOnnx_) {
+            if (tdse3dOnnxRunRequested_) {
+                runOnnxRollout3d();
+                tdse3dOnnxRunRequested_ = false;
+            }
+            return;
+        }
+
         if (tdse3dPotDirty_)   { rebuild3dPotential(); }
         if (tdse3dNeedsReset_) { reset3dWavefunction(); }
         if (!computeEuler_)    { return; }

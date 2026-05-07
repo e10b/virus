@@ -7,6 +7,11 @@ project(atoms VERSION 0.1.0 LANGUAGES CXX C)
 #set(SHADERC_SKIP_TESTS ON CACHE INTERNAL "")
 #add_subdirectory(deps/shaderc)
 option(DEV_MODE "Set up development helper settings" ON)
+option(ATOMS_ENABLE_ONNX "Enable ONNX Runtime integration for TDSE inference" OFF)
+option(ATOMS_ENABLE_TORCHSCRIPT "Enable TorchScript/libtorch integration for TDSE inference" OFF)
+
+set(ONNXRUNTIME_ROOT "" CACHE PATH "Path to ONNX Runtime installation root")
+set(TORCH_ROOT "" CACHE PATH "Path to libtorch installation root")
 
 # Disable LevelDB tests to avoid pulling in googletest when not required.
 # You can also pass -DLEVELDB_BUILD_TESTS=OFF to cmake on the command line.
@@ -54,6 +59,38 @@ endif()
 target_link_libraries(App PRIVATE webgpu sdl2webgpu SDL3-static glm::glm)
 target_include_directories(App PRIVATE "deps/wgfx/src" "deps/sdl3/include" "deps" "deps/imgui" "deps/imgui/backends")
 target_compile_definitions(App PRIVATE IMGUI_IMPL_WEBGPU_BACKEND_WGPU)
+
+if(ATOMS_ENABLE_ONNX)
+  find_path(ONNXRUNTIME_INCLUDE_DIR
+    NAMES onnxruntime_cxx_api.h
+    HINTS ${ONNXRUNTIME_ROOT}
+    PATH_SUFFIXES include include/onnxruntime include/onnxruntime/core/session onnxruntime/include
+  )
+
+  find_library(ONNXRUNTIME_LIBRARY
+    NAMES onnxruntime
+    HINTS ${ONNXRUNTIME_ROOT}
+    PATH_SUFFIXES lib lib64
+  )
+
+  if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
+    message(FATAL_ERROR "ATOMS_ENABLE_ONNX=ON but ONNX Runtime not found. Set ONNXRUNTIME_ROOT to your ONNX Runtime install path.")
+  endif()
+
+  target_include_directories(App PRIVATE ${ONNXRUNTIME_INCLUDE_DIR})
+  target_link_libraries(App PRIVATE ${ONNXRUNTIME_LIBRARY})
+  target_compile_definitions(App PRIVATE ATOMS_ENABLE_ONNX=1)
+endif()
+
+if(ATOMS_ENABLE_TORCHSCRIPT)
+  if(TORCH_ROOT)
+    list(PREPEND CMAKE_PREFIX_PATH "${TORCH_ROOT}")
+  endif()
+
+  find_package(Torch REQUIRED)
+  target_link_libraries(App PRIVATE ${TORCH_LIBRARIES})
+  target_compile_definitions(App PRIVATE ATOMS_ENABLE_TORCHSCRIPT=1)
+endif()
 
 target_copy_webgpu_binaries(App)
 
