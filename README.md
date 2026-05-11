@@ -25,6 +25,16 @@ cmake --build out -j
 ./out/App
 ```
 
+## Web Build
+
+```bash
+emcmake cmake -S . -B build-web -DCMAKE_BUILD_TYPE=Release
+cmake --build build-web -j
+python3 -m http.server 8080 -d build-web
+```
+
+Then open `http://localhost:8080/App.html` in a WebGPU-enabled browser.
+
 ## Layout
 
 - `deps/wgfx`: WebGPU, SDL3, GLM, and graphics helpers

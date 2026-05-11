@@ -14,8 +14,12 @@ struct ViralUniform {
     hanta: vec4f,  // reserved
 };
 
+struct ViralCells {
+    data: array<vec4f>,
+};
+
 @group(0) @binding(0) var<uniform> u: ViralUniform;
-@group(0) @binding(1) var<storage, read> cells: array<vec4f>;
+@group(0) @binding(1) var<storage, read> cells: ViralCells;
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
@@ -43,7 +47,7 @@ fn sampleCell(pos01: vec2f, n: i32) -> vec4f {
     let p = clamp(pos01, vec2f(0.0), vec2f(1.0));
     let ix = clamp(i32(floor(p.x * f32(n))), 0, n - 1);
     let iy = clamp(i32(floor(p.y * f32(n))), 0, n - 1);
-    return cells[u32(iy * n + ix)];
+    return cells.data[u32(iy * n + ix)];
 }
 
 @fragment

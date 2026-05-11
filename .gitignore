@@ -1,6 +1,7 @@
 out/
 out-public/
 build/
+build-web/
 .cache/
 .DS_Store
 temp/
