@@ -1,9 +1,11 @@
 .vs/
 out/
 build/
+build-web/
 .cache/
 
 ressavemeplease/build/
 out/
 .cache/
 .DS_Store
+temp/
