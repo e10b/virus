@@ -4,7 +4,7 @@
 Context::Context()
 {
 	if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) { std::cout << "Couldn't init SDL!\n"; }
-	window = SDL_CreateWindow("Learn WebGPU", 1280, 720, SDL_WINDOW_RESIZABLE);
+	window = SDL_CreateWindow("Viral Dynamics", 1280, 720, SDL_WINDOW_RESIZABLE);
 	wgfx::init(wgfx::getSurface(window));
 
 }
@@ -20,15 +20,6 @@ void Context::update()
 		case SDL_EVENT_WINDOW_RESIZED:
 		{
 			wgfx::initSurface();
-			//wgfx::initDepth();
-			//gonna need a different way to do this
-
-
-			int width, height;
-			SDL_GetWindowSize(window, &width, &height);
-
-			//proj = glm::perspective(glm::radians(50.0f), float(width) / float(height), 0.1f, 100.0f);
-			//pipeline.updateUniform(projUniform, glm::value_ptr(proj));
 		}
 		break;
 

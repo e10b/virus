@@ -1,19 +1,7 @@
-[submodule "deps/glm"]
-	path = deps/glm
-	url = git@github.com:g-truc/glm.git
-[submodule "deps/webgpu"]
-	path = deps/webgpu
-	url = git@github.com:eliemichel/WebGPU-distribution.git
-[submodule "deps/sdl3"]
-	path = deps/sdl3
-	url = git@github.com:libsdl-org/SDL.git
 [submodule "deps/wgfx"]
 	path = deps/wgfx
-	url = git@github.com:Vyscosity/wgfx.git
+	url = git@github.com:e10b/wgfx.git
 	branch = main
 [submodule "deps/imgui"]
 	path = deps/imgui
 	url = https://github.com/ocornut/imgui.git
-[submodule "shrodinger"]
-	path = shrodinger
-	url = git@github.com:vyscosity/shrodinger.git

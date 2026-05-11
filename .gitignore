@@ -1,11 +1,6 @@
-.vs/
 out/
+out-public/
 build/
-build-web/
-.cache/
-
-ressavemeplease/build/
-out/
 .cache/
 .DS_Store
 temp/
