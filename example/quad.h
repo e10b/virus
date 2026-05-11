@@ -131,15 +131,18 @@ public:
 
     wgfx::Pipeline* pipeline = nullptr;
 
-    // Called from main.cpp before the render pass when in 3D TDSE mode.
-    // The ComputePass must be begun/ended around this call.
+    // Called from main.cpp before the render pass for simulation updates.
     wgfx::ComputePass computePass3d;
 
-    void dispatchCompute3d() {
-        if (renderPath_ != RenderPath::Path3D) return;
-        computePass3d.prepare();
-        dispatchCompute(computePass3d);
-        computePass3d.end();
+    void dispatchComputeSimulations(float dt) {
+        if (renderPath_ == RenderPath::Path3D) {
+            computePass3d.prepare();
+            dispatchCompute(computePass3d);
+            computePass3d.end();
+        } else if (renderPath_ == RenderPath::ViralComparison) {
+            stepViralSimulation(dt);
+            uploadViralGrid();
+        }
     }
 
     void render(float dt) {
@@ -149,6 +152,10 @@ public:
         }
         if (renderPath_ == RenderPath::Path3D) {
             render3d(dt);
+            return;
+        }
+        if (renderPath_ == RenderPath::ViralComparison) {
+            renderViral(dt);
             return;
         }
 
@@ -213,8 +220,9 @@ public:
         int pathIndex = static_cast<int>(renderPath_);
         if (ImGui::Combo("path", &pathIndex, "orbital\0"
                                                "2d\0"
-                                               "3d TDSE\0")) {
-            renderPath_ = static_cast<RenderPath>(std::clamp(pathIndex, 0, 2));
+                                               "3d TDSE\0"
+                                               "viral dynamics\0")) {
+            renderPath_ = static_cast<RenderPath>(std::clamp(pathIndex, 0, 3));
             if (renderPath_ == RenderPath::Path2D) {
                 pipeline = pipeline2d_;
                 pipeline->setVertexBuffer(vbo2d_.get());
@@ -225,11 +233,92 @@ public:
                 pipeline->setIndexBuffer(ibo3d_.get());
                 // Snap the 3D camera to fit the current domain on first switch
                 camera3d_.resetForDomain(tdse3dDomainHalf_);
+            } else if (renderPath_ == RenderPath::ViralComparison) {
+                pipeline = pipelineViral_;
+                pipeline->setVertexBuffer(vbo2d_.get());
+                pipeline->setIndexBuffer(ibo2d_.get());
             } else {
                 pipeline = pipelineOrbital_;
                 pipeline->setVertexBuffer(vbo_.get());
                 pipeline->setIndexBuffer(ibo_.get());
             }
+        }
+
+        if (renderPath_ == RenderPath::ViralComparison) {
+            ImGui::Separator();
+            ImGui::Text("Viral Dynamics Comparison");
+            ImGui::TextWrapped("Single GPU cellular automata simulation. Choose a model preset or tune the parameters directly.");
+
+            int gridSize = viralGridSize_;
+            int model = viralModel_;
+            const int oldGrid = viralGridSize_;
+            const int oldModel = viralModel_;
+            const float oldDensity = viralPopulationDensityPercent_;
+            const float oldInitialCases = viralInitialCasesPercent_;
+
+            if (ImGui::Combo("model##viral", &model, "COVID\0Hantavirus\0Black Plague\0Custom\0")) {
+                viralModel_ = std::clamp(model, 0, 3);
+                if (viralModel_ == 0) {
+                    viralSpreadPercent_ = 14.0f;
+                    viralMortalityPercent_ = 3.0f;
+                    viralDiseaseDurationTicks_ = 30;
+                } else if (viralModel_ == 1) {
+                    viralSpreadPercent_ = 5.0f;
+                    viralMortalityPercent_ = 38.0f;
+                    viralDiseaseDurationTicks_ = 8;
+                } else if (viralModel_ == 2) {
+                    viralSpreadPercent_ = 12.0f;
+                    viralMortalityPercent_ = 70.0f;
+                    viralDiseaseDurationTicks_ = 10;
+                }
+                viralNeedsReset_ = true;
+            }
+
+            ImGui::SliderInt("grid##viral", &gridSize, kMinViralGrid, 200);
+            ImGui::SliderFloat("ticks/sec##viral", &viralTicksPerSecond_, 0.25f, 30.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::Checkbox("paused##viral", &viralPaused_);
+            ImGui::SliderFloat("Spread Prob (%)##viral", &viralSpreadPercent_, 0.0f, 100.0f, "%.1f");
+            ImGui::SliderFloat("Mortality Rate (%)##viral", &viralMortalityPercent_, 0.0f, 100.0f, "%.1f");
+            ImGui::SliderFloat("Pop. Density (%)##viral", &viralPopulationDensityPercent_, 1.0f, 100.0f, "%.1f");
+            ImGui::SliderFloat("Initial Cases (%)##viral", &viralInitialCasesPercent_, 0.01f, 10.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::SliderInt("Disease Duration (ticks)##viral", &viralDiseaseDurationTicks_, 1, 60);
+            ImGui::SliderFloat("zoom##viral", &viralZoom_, 0.25f, 20.0f, "%.2f", ImGuiSliderFlags_Logarithmic);
+            ImGui::TextWrapped("Presets: COVID ~3%% fatality. Hantavirus ~38%% HPS fatality. Black Plague uses untreated plague mortality (~66-93%%) with a shorter incubation/resolution window.");
+
+            if (ImGui::Button("Reset viral sim")) {
+                viralNeedsReset_ = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button(viralPaused_ ? "Resume##viral" : "Pause##viral")) {
+                viralPaused_ = !viralPaused_;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Reset view##viral")) {
+                viralZoom_ = 1.0f;
+                viralPan_ = glm::vec2(0.0f);
+            }
+
+            viralGridSize_ = std::clamp(gridSize, kMinViralGrid, kMaxViralGrid);
+            if (viralGridSize_ != oldGrid) {
+                resizeViralBuffers();
+            }
+            if (viralModel_ != oldModel) {
+                viralNeedsReset_ = true;
+            }
+            if (viralPopulationDensityPercent_ != oldDensity || viralInitialCasesPercent_ != oldInitialCases) {
+                viralNeedsReset_ = true;
+            }
+            ImGui::Text("t = %.1f", viralTime_);
+            ImGui::Text("S: %d  I: %d  R: %d  D: %d",
+                viralSusceptibleCount_, viralInfectedCount_, viralRecoveredCount_, viralDeadCount_);
+            const int resolvedPopulation = viralRecoveredCount_ + viralDeadCount_;
+            const float fatalityRatio = (resolvedPopulation > 0)
+                ? (100.0f * static_cast<float>(viralDeadCount_) / static_cast<float>(resolvedPopulation))
+                : 0.0f;
+            ImGui::Text("Fatality ratio (resolved): %.2f%%", fatalityRatio);
+
+            ImGui::End();
+            return;
         }
 
         if (renderPath_ == RenderPath::Path3D) {
@@ -670,7 +759,8 @@ private:
     enum class RenderPath : int {
         Orbital = 0,
         Path2D = 1,
-        Path3D = 2
+        Path3D = 2,
+        ViralComparison = 3
     };
 
     struct alignas(16) GpuOrbitalState {
@@ -693,6 +783,16 @@ private:
         glm::vec4 render;   // x=colorMode, y=aspect, z=showPotential, w=sliceAxis
         glm::vec4 march;    // x=stepCount, y=alphaScale, z=slicePos, w=reserved
     };
+    struct alignas(16) GpuViralState {
+        glm::vec4 params; // x=gridSize, y=aspect, z=time, w=reserved
+        glm::vec4 view;   // x=zoom, y=panX, z=panY, w=populationDensity
+        glm::vec4 covid;  // x=spread, y=mortality, z=activeScale, w=model
+        glm::vec4 hanta;  // reserved
+    };
+    struct ViralCell {
+        int state = 0; // 0 empty, 1 susceptible, 2 infected, 3 recovered, 4 dead
+        int daysInfected = 0;
+    };
 
     static constexpr int kMaxParticles = 250000;
 
@@ -706,6 +806,9 @@ private:
     wgfx::Pipeline* pipelineOrbital_ = nullptr;
     wgfx::Pipeline* pipeline2d_ = nullptr;
     wgfx::Pipeline* pipelineTdse2d_ = nullptr;
+    wgfx::Pipeline* pipelineViral_ = nullptr;
+    wgfx::Uniform* stateUniformViral_ = nullptr;
+    wgfx::Uniform* viralCurrent_ = nullptr;
 
     std::unique_ptr<wgfx::VertexBuffer> vbo3d_;
     std::unique_ptr<wgfx::IndexBuffer> ibo3d_;
@@ -796,6 +899,38 @@ private:
     std::vector<float> tdseRhsImag_;
     std::vector<float> tdsePotential_;
     std::vector<float> tdseUpload_;
+
+    // ---- Viral dynamics comparison state ----
+    static constexpr int kMinViralGrid = 20;
+    static constexpr int kMaxViralGrid = 512;
+    GpuViralState gpuViralState_{};
+    int viralGridSize_ = 60;
+    float viralTicksPerSecond_ = 5.0f;
+    float viralTickAccumulator_ = 0.0f;
+    bool viralPaused_ = false;
+    bool viralNeedsReset_ = true;
+    bool viralUploadDirty_ = true;
+    uint32_t viralStepIndex_ = 1;
+    float viralTime_ = 0.0f;
+    float viralPopulationDensityPercent_ = 62.0f;
+    int viralModel_ = 0; // 0=COVID, 1=Hantavirus, 2=Black Plague, 3=Custom
+    float viralSpreadPercent_ = 14.0f;
+    float viralMortalityPercent_ = 3.0f;
+    float viralInitialCasesPercent_ = 1.0f;
+    int viralDiseaseDurationTicks_ = 30;
+    int viralSusceptibleCount_ = 0;
+    int viralInfectedCount_ = 0;
+    int viralRecoveredCount_ = 0;
+    int viralDeadCount_ = 0;
+    float viralZoom_ = 1.0f;
+    glm::vec2 viralPan_ = glm::vec2(0.0f);
+    bool viralDragging_ = false;
+    glm::vec2 viralLastMouse_ = glm::vec2(0.0f);
+    uint32_t viralSeed_ = 0x5eed1234u;
+    std::mt19937 viralRng_{viralSeed_};
+    std::vector<ViralCell> viralGrid_;
+    std::vector<ViralCell> viralNextGrid_;
+    std::vector<float> viralUpload_;
 
     bool prevW_ = false;
     bool prevS_ = false;
@@ -984,6 +1119,21 @@ private:
         init3dBuffers();
         pipeline3d_->init(vbo3d_.get());
 
+        pipelineViral_ = wgfx::loadPipeline(wgfx::loadFromFile((std::string(RESOURCE_DIR) + "/" + "viral_compare.wgsl").c_str()));
+        stateUniformViral_ = wgfx::createUniform(0, sizeof(GpuViralState), reinterpret_cast<const float*>(&gpuViralState_));
+        const size_t kMaxViralCells = static_cast<size_t>(kMaxViralGrid) * static_cast<size_t>(kMaxViralGrid);
+        viralCurrent_ = wgfx::createStorage(1, kMaxViralCells * 4 * sizeof(float), nullptr, false);
+        wgfx::Uniform* renderViralCurrent = makeRenderStorage(viralCurrent_, 1, true);
+        pipelineViral_->setUniform(stateUniformViral_);
+        pipelineViral_->uniforms.visibility = WGPUShaderStage_Fragment;
+        pipelineViral_->uniforms.setStorage(renderViralCurrent);
+        pipelineViral_->uniforms.visibility = WGPUShaderStage_Vertex | WGPUShaderStage_Fragment;
+        pipelineViral_->targets = 1;
+        pipelineViral_->useDepth = false;
+        pipelineViral_->setVertexBuffer(vbo2d_.get());
+        pipelineViral_->setIndexBuffer(ibo2d_.get());
+        pipelineViral_->init(vbo2d_.get());
+
         // ---- Build compute pipelines (all share one WGSL, different entry points) ----
         const std::string computeSrc = wgfx::loadFromFile(
             (std::string(RESOURCE_DIR) + "/" + "tdse3d_compute.wgsl").c_str());
@@ -1008,6 +1158,7 @@ private:
 
         // ---- Initial sim state ----
         resize3dBuffers();
+        resizeViralBuffers();
 
         // Initialize the dedicated 3D TDSE camera
         camera3d_.resetForDomain(tdse3dDomainHalf_);
@@ -1066,6 +1217,169 @@ private:
         ibo3d_.reset(wgfx::createIndexBuffer(indices));
         pipeline3d_->setVertexBuffer(vbo3d_.get());
         pipeline3d_->setIndexBuffer(ibo3d_.get());
+    }
+
+    void resizeViralBuffers() {
+        viralGridSize_ = std::clamp(viralGridSize_, kMinViralGrid, kMaxViralGrid);
+        const size_t cellCount = static_cast<size_t>(viralGridSize_) * static_cast<size_t>(viralGridSize_);
+        viralGrid_.assign(cellCount, ViralCell{});
+        viralNextGrid_.assign(cellCount, ViralCell{});
+        viralUpload_.assign(cellCount * 4, 0.0f);
+        viralNeedsReset_ = true;
+        viralUploadDirty_ = true;
+    }
+
+    void resetViralSimulation() {
+        const int n = std::clamp(viralGridSize_, kMinViralGrid, kMaxViralGrid);
+        viralGridSize_ = n;
+        const size_t cellCount = static_cast<size_t>(n) * static_cast<size_t>(n);
+        if (viralGrid_.size() != cellCount) {
+            viralGrid_.assign(cellCount, ViralCell{});
+            viralNextGrid_.assign(cellCount, ViralCell{});
+            viralUpload_.assign(cellCount * 4, 0.0f);
+        }
+
+        viralSeed_ += 0x9e3779b9u;
+        viralRng_.seed(viralSeed_);
+        std::uniform_real_distribution<float> random01(0.0f, 1.0f);
+        const float density = std::clamp(viralPopulationDensityPercent_ * 0.01f, 0.01f, 1.0f);
+        const float initialCases = std::clamp(viralInitialCasesPercent_ * 0.01f, 0.0001f, 0.25f);
+
+        for (int y = 0; y < n; ++y) {
+            for (int x = 0; x < n; ++x) {
+                const size_t idx = static_cast<size_t>(y) * static_cast<size_t>(n) + static_cast<size_t>(x);
+                const bool populated = random01(viralRng_) <= density;
+                const bool seedCase = populated && random01(viralRng_) <= initialCases;
+                viralGrid_[idx].state = populated ? (seedCase ? 2 : 1) : 0;
+                viralGrid_[idx].daysInfected = 0;
+            }
+        }
+
+        viralStepIndex_ = 1;
+        viralTime_ = 0.0f;
+        viralTickAccumulator_ = 0.0f;
+        viralNeedsReset_ = false;
+        viralUploadDirty_ = true;
+        updateViralStats();
+    }
+
+    int viralIndex(int x, int y) const {
+        return y * viralGridSize_ + x;
+    }
+
+    int countInfectedNeighbors(int x, int y) const {
+        int count = 0;
+        for (int oy = -1; oy <= 1; ++oy) {
+            for (int ox = -1; ox <= 1; ++ox) {
+                if (ox == 0 && oy == 0) {
+                    continue;
+                }
+                const int nx = x + ox;
+                const int ny = y + oy;
+                if (nx < 0 || ny < 0 || nx >= viralGridSize_ || ny >= viralGridSize_) {
+                    continue;
+                }
+                if (viralGrid_[static_cast<size_t>(viralIndex(nx, ny))].state == 2) {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    }
+
+    void updateViralStats() {
+        viralSusceptibleCount_ = 0;
+        viralInfectedCount_ = 0;
+        viralRecoveredCount_ = 0;
+        viralDeadCount_ = 0;
+        for (const ViralCell& cell : viralGrid_) {
+            if (cell.state == 1) ++viralSusceptibleCount_;
+            else if (cell.state == 2) ++viralInfectedCount_;
+            else if (cell.state == 3) ++viralRecoveredCount_;
+            else if (cell.state == 4) ++viralDeadCount_;
+        }
+    }
+
+    void stepViralSimulation(float dt) {
+        if (viralNeedsReset_) {
+            resetViralSimulation();
+        }
+        if (viralPaused_ || viralTicksPerSecond_ <= 0.0f || viralGrid_.empty()) {
+            return;
+        }
+
+        const float ticksPerSecond = std::clamp(viralTicksPerSecond_, 0.25f, 30.0f);
+        viralTickAccumulator_ += std::max(dt, 0.0f) * ticksPerSecond;
+        const int steps = std::clamp(static_cast<int>(std::floor(viralTickAccumulator_)), 0, 64);
+        if (steps <= 0) {
+            return;
+        }
+        viralTickAccumulator_ -= static_cast<float>(steps);
+
+        std::uniform_real_distribution<float> random01(0.0f, 1.0f);
+        const float spread = std::clamp(viralSpreadPercent_ * 0.01f, 0.0f, 1.0f);
+        const float mortality = std::clamp(viralMortalityPercent_ * 0.01f, 0.0f, 1.0f);
+        const int duration = std::max(1, viralDiseaseDurationTicks_);
+        const float deathHazardPerTick = 1.0f - std::pow(1.0f - mortality, 1.0f / static_cast<float>(duration));
+
+        for (int step = 0; step < steps; ++step) {
+            viralNextGrid_ = viralGrid_;
+            for (int y = 0; y < viralGridSize_; ++y) {
+                for (int x = 0; x < viralGridSize_; ++x) {
+                    const size_t idx = static_cast<size_t>(viralIndex(x, y));
+                    const ViralCell& cell = viralGrid_[idx];
+                    ViralCell& next = viralNextGrid_[idx];
+
+                    if (cell.state == 1) {
+                        const int infectedNeighbors = countInfectedNeighbors(x, y);
+                        if (infectedNeighbors > 0) {
+                            const float pInfection = 1.0f - std::pow(1.0f - spread, static_cast<float>(infectedNeighbors));
+                            if (random01(viralRng_) < pInfection) {
+                                next.state = 2;
+                                next.daysInfected = 0;
+                            }
+                        }
+                    } else if (cell.state == 2) {
+                        next.daysInfected = cell.daysInfected + 1;
+                        if (random01(viralRng_) < deathHazardPerTick) {
+                            next.state = 4;
+                            next.daysInfected = 0;
+                        } else if (next.daysInfected >= duration) {
+                            next.state = 3;
+                            next.daysInfected = 0;
+                        }
+                    }
+                }
+            }
+            viralGrid_.swap(viralNextGrid_);
+            viralTime_ += 1.0f;
+            ++viralStepIndex_;
+        }
+
+        updateViralStats();
+        viralUploadDirty_ = true;
+    }
+
+    void uploadViralGrid() {
+        if (!viralUploadDirty_ || !viralCurrent_ || viralGrid_.empty()) {
+            return;
+        }
+
+        const float invDuration = 1.0f / static_cast<float>(std::max(1, viralDiseaseDurationTicks_));
+        if (viralUpload_.size() != viralGrid_.size() * 4) {
+            viralUpload_.assign(viralGrid_.size() * 4, 0.0f);
+        }
+        for (size_t i = 0; i < viralGrid_.size(); ++i) {
+            const size_t base = i * 4;
+            viralUpload_[base + 0] = static_cast<float>(viralGrid_[i].state);
+            viralUpload_[base + 1] = static_cast<float>(viralGrid_[i].daysInfected) * invDuration;
+            viralUpload_[base + 2] = 0.0f;
+            viralUpload_[base + 3] = 0.0f;
+        }
+
+        wgfx::queue.writeBuffer(viralCurrent_->buffer, 0,
+            viralUpload_.data(), viralUpload_.size() * sizeof(float));
+        viralUploadDirty_ = false;
     }
 
     void resize3dBuffers() {
@@ -1524,13 +1838,13 @@ private:
 
         for (int s = 0; s < substeps; ++s) {
             if (tdse3dIntegrator_ == 0) {
-                cp.draw(computeEuler_, wg, wg, wg);
+                cp.drawXYZ(computeEuler_, wg, wg, wg);
             } else {
-                cp.draw(computeCnRhs_, wg, wg, wg);
+                cp.drawXYZ(computeCnRhs_, wg, wg, wg);
                 for (int iter = 0; iter < CN_ITERS; ++iter) {
-                    cp.draw(computeCnIter_, wg, wg, wg);
+                    cp.drawXYZ(computeCnIter_, wg, wg, wg);
                 }
-                cp.draw(computeCnFinish_, wg, wg, wg);
+                cp.drawXYZ(computeCnFinish_, wg, wg, wg);
             }
             std::swap(gpuWaveA_, gpuWaveB_);
             tdse3dTime_ += gpuComputeParams_.dt;
@@ -1587,6 +1901,69 @@ private:
         pipeline3d_->setVertexBuffer(vbo3d_.get());
         pipeline3d_->setIndexBuffer(ibo3d_.get());
         pipeline = pipeline3d_;
+    }
+
+    void renderViral(float dt) {
+        int width = 1280;
+        int height = 720;
+        SDL_GetWindowSize(Context::Instance().window, &width, &height);
+        const float aspect = (height > 0) ? static_cast<float>(width) / static_cast<float>(height) : (16.0f / 9.0f);
+        processViralNavigation(width, height, aspect, dt);
+
+        gpuViralState_.params = glm::vec4(static_cast<float>(viralGridSize_), aspect, viralTime_, 0.0f);
+        gpuViralState_.view = glm::vec4(
+            std::max(viralZoom_, 0.001f),
+            viralPan_.x,
+            viralPan_.y,
+            std::clamp(viralPopulationDensityPercent_ * 0.01f, 0.01f, 1.0f));
+        gpuViralState_.covid = glm::vec4(
+            std::clamp(viralSpreadPercent_ * 0.01f, 0.0f, 1.0f),
+            std::clamp(viralMortalityPercent_ * 0.01f, 0.0f, 1.0f),
+            1.0f,
+            static_cast<float>(viralModel_));
+        gpuViralState_.hanta = glm::vec4(0.0f);
+
+        pipelineViral_->updateUniform(stateUniformViral_, reinterpret_cast<const float*>(&gpuViralState_));
+        pipelineViral_->setVertexBuffer(vbo2d_.get());
+        pipelineViral_->setIndexBuffer(ibo2d_.get());
+        pipeline = pipelineViral_;
+    }
+
+    void processViralNavigation(int width, int height, float aspect, float dt) {
+        (void)dt;
+        ImGuiIO& io = ImGui::GetIO();
+        const bool allowMouseCapture = !io.WantCaptureMouse;
+
+        float wheel = Context::Instance().consumeWheelDelta();
+        if (wheel != 0.0f && allowMouseCapture) {
+            viralZoom_ *= std::exp(wheel * 0.12f);
+            viralZoom_ = std::clamp(viralZoom_, 0.25f, 20.0f);
+        }
+
+        float mx = 0.0f;
+        float my = 0.0f;
+        Uint32 mask = SDL_GetMouseState(&mx, &my);
+        const bool draggingNow = allowMouseCapture && ((mask & SDL_BUTTON_LMASK) != 0 || (mask & SDL_BUTTON_MMASK) != 0);
+        if (!draggingNow) {
+            viralDragging_ = false;
+            return;
+        }
+
+        if (!viralDragging_) {
+            viralDragging_ = true;
+            viralLastMouse_ = glm::vec2(mx, my);
+            return;
+        }
+
+        const glm::vec2 mouse(mx, my);
+        const glm::vec2 delta = mouse - viralLastMouse_;
+        viralLastMouse_ = mouse;
+
+        const float h = static_cast<float>(std::max(height, 1));
+        glm::vec2 panDelta(
+            -2.0f * delta.x / h * std::max(aspect, 0.001f) / std::max(viralZoom_, 0.001f),
+             2.0f * delta.y / h / std::max(viralZoom_, 0.001f));
+        viralPan_ += panDelta;
     }
 
 

@@ -63,10 +63,11 @@ int main()
 		ImGui::Render();
 
 		wgfx::touch(color);
+		// One encoder per frame: compute + scene + ImGui passes encode here; frame() finishes it.
+		wgfx::start();
 
-		// Run GPU compute (FDTD step) — must happen BEFORE the render pass
-		// so the updated waveB storage buffer is ready for the fragment shader.
-		quad.dispatchCompute3d();
+		// Run GPU compute before the render pass so storage buffers are ready for shading.
+		quad.dispatchComputeSimulations(dt);
 
 		// Render the fullscreen quad with analytic sphere ray tracing in fragment WGSL.
 		pass.prepare();
